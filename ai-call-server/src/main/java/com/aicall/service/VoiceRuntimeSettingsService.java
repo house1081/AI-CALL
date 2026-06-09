@@ -1,0 +1,214 @@
+package com.aicall.service;
+
+import com.aicall.common.BizException;
+import com.aicall.common.SilenceProfile;
+import com.aicall.config.AiVoiceProperties;
+import com.aicall.dto.VoiceRuntimeConfigDto;
+import com.aicall.entity.VoiceRuntimeConfig;
+import com.aicall.entity.CallTask;
+import com.aicall.mapper.CallTaskMapper;
+import com.aicall.mapper.VoiceRuntimeConfigMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+import java.time.LocalDateTime;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 外呼语音运行时配置（分段 ASR → LLM → CosyVoice TTS；后台可改，每通外呼从库读取）。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class VoiceRuntimeSettingsService {
+
+    private static final int CONFIG_ID = 1;
+
+    private final VoiceRuntimeConfigMapper voiceRuntimeConfigMapper;
+    private final CallTaskMapper callTaskMapper;
+    private final AiVoiceProperties aiVoiceProperties;
+    private final DashScopeApiKeyResolver dashScopeApiKeyResolver;
+    private final ObjectProvider<OpeningVoiceCacheService> openingVoiceCacheProvider;
+    private final ObjectProvider<EndingVoiceCacheService> endingVoiceCacheProvider;
+
+    private final ConcurrentHashMap<String, SilenceProfile.Params> callSilenceProfiles = new ConcurrentHashMap<>();
+
+    public String resolveSilenceProfile(Integer taskId) {
+        if (taskId != null) {
+            CallTask task = callTaskMapper.selectById(taskId);
+            if (task != null && SilenceProfile.isValid(task.getSilenceProfile())) {
+                return SilenceProfile.normalize(task.getSilenceProfile());
+            }
+        }
+        VoiceRuntimeConfig row = loadRow();
+        if (row != null && SilenceProfile.isValid(row.getSilenceProfile())) {
+            return SilenceProfile.normalize(row.getSilenceProfile());
+        }
+        return SilenceProfile.normalize(aiVoiceProperties.getSilenceProfile());
+    }
+
+    public SilenceProfile.Params resolveSilenceParams(Integer taskId) {
+        return SilenceProfile.resolve(resolveSilenceProfile(taskId));
+    }
+
+    public void bindCallSilenceProfile(String fsUuid, Integer taskId) {
+        if (!StringUtils.hasText(fsUuid)) {
+            return;
+        }
+        SilenceProfile.Params params = resolveSilenceParams(taskId);
+        callSilenceProfiles.put(fsUuid.trim(), params);
+        log.info("[语音配置] 句末档位 uuid={} profile={} silenceMs={} vadThreshold={}",
+                fsUuid.trim(), params.profile(), params.userSilenceMs(), params.vadThreshold());
+    }
+
+    public void unbindCallSilenceProfile(String fsUuid) {
+        if (StringUtils.hasText(fsUuid)) {
+            callSilenceProfiles.remove(fsUuid.trim());
+        }
+    }
+
+    public SilenceProfile.Params silenceParamsForCall(String fsUuid) {
+        if (!StringUtils.hasText(fsUuid)) {
+            return SilenceProfile.resolve(aiVoiceProperties.getSilenceProfile());
+        }
+        SilenceProfile.Params cached = callSilenceProfiles.get(fsUuid.trim());
+        return cached != null ? cached : SilenceProfile.resolve(aiVoiceProperties.getSilenceProfile());
+    }
+
+    public int resolveUserSilenceMs(String fsUuid) {
+        return silenceParamsForCall(fsUuid).userSilenceMs();
+    }
+
+    public double resolveVadThreshold(String fsUuid) {
+        return silenceParamsForCall(fsUuid).vadThreshold();
+    }
+
+    public int resolveAsrVadSilenceMs(String fsUuid) {
+        return resolveUserSilenceMs(fsUuid);
+    }
+
+    public String getCosyvoiceCloneVoiceId() {
+        VoiceRuntimeConfig row = loadRow();
+        if (row != null && StringUtils.hasText(row.getCosyvoiceCloneVoiceId())) {
+            return row.getCosyvoiceCloneVoiceId().trim();
+        }
+        return StringUtils.hasText(aiVoiceProperties.getTtsCloneVoiceId())
+                ? aiVoiceProperties.getTtsCloneVoiceId().trim()
+                : "";
+    }
+
+    public boolean isPlayOpeningOnAnswer() {
+        VoiceRuntimeConfig row = loadRow();
+        if (row != null && row.getPlayOpeningOnAnswer() != null) {
+            return row.getPlayOpeningOnAnswer() == 1;
+        }
+        return aiVoiceProperties.isPlayOpeningOnAnswer();
+    }
+
+    public void logEffectiveVoiceProfile(String context) {
+        logEffectiveVoiceProfile(context, null);
+    }
+
+    public void logEffectiveVoiceProfile(String context, Integer taskId) {
+        String ctx = StringUtils.hasText(context) ? context : "外呼";
+        SilenceProfile.Params sp = resolveSilenceParams(taskId);
+        log.info("[语音配置] {} 生效 taskId={} cosyVoice={} silenceProfile={} silenceMs={} playOpening={}",
+                ctx, taskId, maskVoiceId(getCosyvoiceCloneVoiceId()), sp.profile(), sp.userSilenceMs(),
+                isPlayOpeningOnAnswer());
+    }
+
+    public VoiceRuntimeConfigDto getForAdmin() {
+        VoiceRuntimeConfigDto dto = new VoiceRuntimeConfigDto();
+        SilenceProfile.Params sp = resolveSilenceParams(null);
+        dto.setSilenceProfile(sp.profile());
+        dto.setEffectiveUserSilenceMs(sp.userSilenceMs());
+        dto.setEffectiveVadThreshold(sp.vadThreshold());
+        dto.setCosyvoiceCloneVoiceId(getCosyvoiceCloneVoiceId());
+        dto.setDefaultCosyvoiceCloneVoiceId(
+                StringUtils.hasText(aiVoiceProperties.getTtsCloneVoiceId())
+                        ? aiVoiceProperties.getTtsCloneVoiceId().trim()
+                        : "");
+        dto.setPlayOpeningOnAnswer(isPlayOpeningOnAnswer());
+        dto.setDashScopeConfigured(isDashScopeConfigured());
+        dto.setCosyvoiceTtsModel(aiVoiceProperties.getTtsModel());
+        dto.setUserSilenceBeforeResponseMs(aiVoiceProperties.getUserSilenceBeforeResponseMs());
+        dto.setTurnBasedPlaybackAsrTailMs(aiVoiceProperties.getTurnBasedPlaybackAsrTailMs());
+        dto.setPlaybackBargeInEnergyThreshold(aiVoiceProperties.getPlaybackBargeInEnergyThreshold());
+        return dto;
+    }
+
+    public void validateVoiceReady(Integer taskId) {
+        if (!StringUtils.hasText(getCosyvoiceCloneVoiceId())) {
+            throw new BizException("请先在总后台配置 CosyVoice 复刻 voice_id");
+        }
+    }
+
+    public void saveFromAdmin(VoiceRuntimeConfigDto req) {
+        if (req == null) {
+            throw new BizException("配置不能为空");
+        }
+        String silenceProfile = SilenceProfile.normalize(
+                StringUtils.hasText(req.getSilenceProfile())
+                        ? req.getSilenceProfile().trim()
+                        : resolveSilenceProfile(null));
+        String cosyVoice = StringUtils.hasText(req.getCosyvoiceCloneVoiceId())
+                ? req.getCosyvoiceCloneVoiceId().trim()
+                : getCosyvoiceCloneVoiceId();
+        if (!StringUtils.hasText(cosyVoice)) {
+            throw new BizException("需配置 CosyVoice 复刻 voice_id");
+        }
+        boolean playOpening = req.getPlayOpeningOnAnswer() != null
+                ? Boolean.TRUE.equals(req.getPlayOpeningOnAnswer())
+                : isPlayOpeningOnAnswer();
+        int playOpeningFlag = playOpening ? 1 : 0;
+
+        VoiceRuntimeConfig row = loadRow();
+        String oldCosy = row != null && StringUtils.hasText(row.getCosyvoiceCloneVoiceId())
+                ? row.getCosyvoiceCloneVoiceId().trim() : "";
+
+        if (row == null) {
+            row = new VoiceRuntimeConfig();
+            row.setId(CONFIG_ID);
+            row.setSilenceProfile(silenceProfile);
+            row.setCosyvoiceCloneVoiceId(cosyVoice);
+            row.setPlayOpeningOnAnswer(playOpeningFlag);
+            row.setUpdateTime(LocalDateTime.now());
+            voiceRuntimeConfigMapper.insert(row);
+        } else {
+            row.setSilenceProfile(silenceProfile);
+            row.setCosyvoiceCloneVoiceId(cosyVoice);
+            row.setPlayOpeningOnAnswer(playOpeningFlag);
+            row.setUpdateTime(LocalDateTime.now());
+            voiceRuntimeConfigMapper.updateById(row);
+        }
+        log.info("[语音配置] 已保存（下一通外呼生效，无需重启）silenceProfile={} cosyVoice={} playOpening={}",
+                silenceProfile, maskVoiceId(cosyVoice), playOpeningFlag);
+
+        if (!cosyVoice.equals(oldCosy)) {
+            openingVoiceCacheProvider.ifAvailable(s -> s.regenerateAsync(null));
+            endingVoiceCacheProvider.ifAvailable(s -> s.regenerateAsync(null));
+            log.info("[语音配置] CosyVoice 音色已变更，已触发开场白/结束语预合成刷新");
+        }
+    }
+
+    private VoiceRuntimeConfig loadRow() {
+        return voiceRuntimeConfigMapper.selectById(CONFIG_ID);
+    }
+
+    private boolean isDashScopeConfigured() {
+        return dashScopeApiKeyResolver.isConfigured();
+    }
+
+    private static String maskVoiceId(String id) {
+        if (!StringUtils.hasText(id)) {
+            return "(未配置)";
+        }
+        if (id.length() <= 12) {
+            return id;
+        }
+        return id.substring(0, 8) + "…" + id.substring(id.length() - 4);
+    }
+}

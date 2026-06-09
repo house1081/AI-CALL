@@ -1,0 +1,8 @@
+# 与 application.yml 本机 FS 配置一致，仅作 profile 备用
+freeswitch:
+  host: 127.0.0.1
+  esl-port: 8021
+  callback-base-url: http://127.0.0.1:8081
+
+ai-voice:
+  playback-base-url: http://127.0.0.1:8081

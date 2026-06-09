@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+.idea/
+*.iml
+uploads/
+.DS_Store
+*.log

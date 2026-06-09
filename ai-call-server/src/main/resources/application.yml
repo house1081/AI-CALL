@@ -1,0 +1,268 @@
+logging:
+  file:
+    name: ./logs/ai-call-server.log
+  charset:
+    console: UTF-8
+    file: UTF-8
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 7
+  level:
+    com.aicall: WARN
+    com.aicall.dialog: INFO
+    com.aicall.service.CallAiVoiceService: INFO
+    com.aicall.service.OutboundDialogLoopService: INFO
+    com.aicall.service.FreeSwitchDialService: INFO
+    com.aicall.service.OutboundAnswerVoiceService: INFO
+    com.aicall.service.DashScopeVoiceTtsService: INFO
+    com.aicall.service.VoicePlaybackService: INFO
+    com.aicall.service.AsrRecognitionService: INFO
+    com.aicall.service.CallUtteranceRecordService: INFO
+    com.aicall.service.DialogRagRetrievalService: INFO
+    com.aicall.service.DialogTrainingQaService: INFO
+    com.aicall.schedule: INFO
+    org.springframework: WARN
+
+server:
+  # 与 FreeSWITCH ESL(8021) 错开；本机 FS 回调用 127.0.0.1:8081（避免与 FS 控制台占用的 8081 冲突）
+  port: 8081
+  address: 127.0.0.1
+
+spring:
+  application:
+    name: ai-call-server
+  mandatory-file-encoding: UTF-8
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+    url: jdbc:mysql://127.0.0.1:3306/ai-call?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: root
+      database: 0
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+
+jwt:
+  secret: ai-call-jwt-secret-key-2026-min-256-bits-required-for-hs256
+  expire-hours: 24
+
+record:
+  upload-path: ./uploads/record/
+
+# FreeSWITCH 本机部署（WSL/Docker 映射 127.0.0.1:8021）
+freeswitch:
+  enabled: true
+  host: 127.0.0.1
+  sip-port: 5060
+  esl-port: 8021
+  # 须与 FS event_socket.conf 中 password 一致；默认 ClueCon
+  esl-password: ClueCon
+  gateway: default
+  callback-secret: ""
+  callback-base-url: http://127.0.0.1:8081
+  # 振铃等待秒数；接通后通话时长由 dialog-max-call-sec+30 自动计算（勿只用 60，否则约 1 分钟 FS 会挂断）
+  originate-timeout-sec: 60
+  # direct=ESL originate sofia/gateway/... &park()，不经 default 里 socket 分机（当前推荐）
+  # socket=loopback/号码/default → dialplan socket 8888；须与 FS all_to_ai 等分机一致
+  outbound-mode: direct
+  outbound-context: default
+  originate-application: "&park()"
+  connect-timeout-ms: 5000
+  read-timeout-ms: 30000
+  # 一通电话结束（含挂断/超时）后自动终止外呼任务，不再拨下一个客户
+  task-terminate-after-call: true
+
+# 外呼语音链路：ASR 转写 → qwen-turbo SSE 对话(带历史) → cosyvoice-v3.5-plus 复刻音色 SSE TTS
+ai-voice:
+  enabled: true
+  play-opening-on-answer: true
+  auto-play-after-originate: true
+  answer-watch-seconds: 50
+  answer-max-ring-count: 10
+  answer-ring-cycle-sec: 4
+  answer-play-delay-ms: 20
+  opening-prewarm-wait-ms: 400
+  answer-watch-poll-ms: 250
+  # cosyvoice=DashScope 仿真人声；http=外部 TTS；speak=FS 机械音
+  tts-mode: cosyvoice
+  tts-model: cosyvoice-v3.5-plus
+  tts-voice: ""
+  tts-clone-voice-id: 
+  # v3.5-plus 须用复刻 voice_id；SSE + PCM；支持 Instruct（中文固定句式）
+  tts-response-format: audio
+  tts-speech-rate: 1.05
+  tts-pitch-rate: 1.02
+  tts-volume: 80
+  # Instruct 示例：场景+情感（外呼推销可用「广告促销」）
+  tts-instruction: 你正在进行广告促销，你说话的情感是 neutral。
+  playback-peak-ratio: 0.95
+  playback-tail-buffer-ms: 80
+  playback-post-stop-ms: 25
+  tts-http-url: ""
+  playback-base-url: http://127.0.0.1:8081
+  fs-fetch-via-esl: true
+  fs-host-os: windows
+  fs-shared-wav-dir: C:/temp/aicall-voice
+  # 通话/ASR 录音落盘（FS uuid_record）；须与 FS 同机且可写
+  fs-record-dir: D:/FreeSWITCH/record
+  # 挂断后复制到 uploads/record，写入 call_record.record_url（如 /uploads/record/call_59_xxx.wav）
+  call-record-enabled: true
+  call-record-publish-dir: ./uploads/record/
+  fs-push-wav-via-esl: false
+  fs-temp-wav-dir: C:/temp/aicall-voice
+  broadcast-legs: aleg
+  fs-curl-wait-ms: 3000
+  prefer-http-playback: false
+  prefer-execute-playback: false
+  fs-builtin-sound: ""
+  speak-voice: en|flite
+  speak-fallback-voices: en|callie,eng|flite
+  # 单轮播报软上限（SpeakTextLimiter 按句号/逗号截断，保证语句完整）
+  max-speak-chars: 36
+  # 整句一次性识别，杜绝流式等待延迟
+  asr-mode: sentence
+  asr-stream-enabled: false
+  # 本机开发用 qwen3-asr-flash（base64 直传）；生产公网 URL 可用 paraformer-8k-v2 / paraformer-v1
+  asr-dashscope-model: qwen3-asr-flash
+  dialog-llm-max-tokens: 64
+  # 略增随机性，回复更口语自然（仍受 Prompt/RAG 约束）
+  dialog-llm-temperature: 0.45
+  dialog-llm-top-p: 0.88
+  # 关闭蜂鸣/内置音效/speak 机械音回退
+  enable-tone-fallback: false
+  enable-builtin-sound-fallback: false
+  enable-speak-fallback: false
+  # RTP 20ms 小包，降低堆积卡顿
+  rtp-packetization-ms: 20
+  disable-comfort-noise: true
+  fs-socket-enabled: true
+  fs-socket-host: 0.0.0.0
+  fs-socket-port: 8888
+  asr-http-url: ""
+  asr-connect-timeout-ms: 5000
+  asr-read-timeout-ms: 45000
+  # ASR：句末静音与 user-silence-before-response-ms 对齐（说完一句再识别）
+  asr-vad-enabled: true
+  asr-vad-silence-ms: 380
+  asr-vad-min-speech-ms: 200
+  asr-vad-poll-ms: 15
+  asr-vad-energy-threshold: 200
+  asr-input-gain: 2.2
+  asr-enable-itn: true
+  asr-context-hint: "金融贷款外呼电话，客户可能说额度、万、利率、周转、抵押、征信、银行、公司、听不清等。"
+  # 客户 5～8s 无有效语音时 AI 主动询问（第1/2/3次：5s/6s/8s）
+  dialog-silence-probe-enabled: true
+  dialog-silence-probe-ms: 6000
+  dialog-silence-probe-min-ms: 5000
+  dialog-silence-probe-max-ms: 8000
+  dialog-silence-probe-max: 3
+  # 句末档位默认：stable=800ms | fast=380ms（任务/DB 可覆盖）
+  silence-profile: fast
+  # 用户句末静音 yml 兜底（实际以 silence-profile 为准）
+  user-silence-before-response-ms: 380
+  asr-record-max-ms: 12000
+  asr-max-slice-sec: 4
+  asr-language: zh-CN
+  asr-model: phone_call
+  asr-audio-format: pcm
+  dialog-record-chunk-sec: 3
+  dialog-max-call-sec: 300
+  dialog-max-rounds: 30
+  dialog-post-play-wait-ms: 50
+  # AI 播报结束尾音等待（播完已 sync 基线，仅留极短缓冲）
+  turn-based-playback-asr-tail-ms: 50
+  # 播报结束自动对齐 ASR 基线，避免回声误打断
+  sync-asr-baseline-after-playback: true
+  sentence-pause-ms: 150
+  # false=整段一次 TTS+一次播放，避免分句多次 displace 产生中间空白
+  tts-stream-enabled: false
+  dialog-enabled: true
+  # 每轮都调大模型+带对话历史（与后台「对话训练」一致）；false 时规则话术可绕过模型
+  dialog-llm-primary: true
+  dialog-max-history-rounds: 2
+  dialog-llm-async: false
+  dialog-llm-stream: true
+  # 流式首句 TTS + LLM 结束后自动补播剩余（CallAiVoiceService）
+  dialog-llm-stream-tts: true
+  dialog-llm-timeout-sec: 12
+  opening-voice-precache-enabled: true
+  opening-voice-cache-dir: ./uploads/tts/opening
+  tts-phrase-cache-dir: ./uploads/tts/phrases
+  tts-min-interval-ms: 100
+  tts-rate-limit-cooldown-ms: 10000
+  tts-rate-limit-retries: 3
+  # 服务就绪后延迟预合成开场白（毫秒），过大会拖慢首通；保存/启用话术会立即触发
+  opening-voice-precache-delay-ms: 500
+  startup-quiet: true
+  playback-barge-in-energy-threshold: 320
+  # 全程录音会混入 TTS，分段模式默认关闭插嘴，保证用户听完整句
+  barge-in-during-turn-based: false
+  barge-in-enabled: true
+  barge-in-threshold: 7
+  barge-in-hold-ms: 150
+  playback-barge-in-grace-ms: 2000
+  playback-barge-in-min-ratio: 0.92
+  # 统一采样率，适配电话线路
+  tts-sample-rate: 16000
+
+# 对话训练 RAG 热更新（方案一：本地向量库即时生效）
+dialog-rag:
+  enabled: true
+  store-type: local
+  embedding-model: text-embedding-v3
+  top-k: 3
+  direct-answer-score: 0.82
+  min-retrieve-score: 0.55
+  strict-no-match-fallback: false
+  manual-correction-weight: 3.0
+  quality-sample-weight: 2.0
+  negative-sample-weight: 1.5
+  loan-main-flow-enabled: true
+  loan-pack-auto-import: true
+  # Milvus 扩展（store-type=milvus 时需部署 Milvus 并自行对接）
+  milvus-host: 127.0.0.1
+  milvus-port: 19530
+  milvus-collection: dialog_training_qa
+
+# Ollama 本地大模型（未配置 dashscope.api-key 时作兜底）
+ollama:
+  base-url: http://192.168.60.28:11434
+  model: qwen:4b
+  connect-timeout-ms: 5000
+  read-timeout-ms: 60000
+  max-tokens: 128
+  temperature: 0.7
+  max-history-rounds: 10
+
+# 阿里云通义千问 DashScope
+# API Key 请在管理端「模型配置」→ 通义千问 中填写（推荐）；下方 api-key / DASHSCOPE_API_KEY 仅作兜底
+# API Key 获取：https://dashscope.console.aliyun.com/apiKey
+dashscope:
+  enabled: true
+  api-key: ${DASHSCOPE_API_KEY:}
+  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen3.5-omni-flash
+  max-tokens: 256
+  temperature: 0.45
+  top-p: 0.88
+  max-history-rounds: 10
+  connect-timeout-ms: 5000
+  read-timeout-ms: 60000
