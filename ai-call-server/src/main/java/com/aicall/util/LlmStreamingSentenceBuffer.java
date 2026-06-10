@@ -14,9 +14,16 @@ public final class LlmStreamingSentenceBuffer {
 
     private final StringBuilder pending = new StringBuilder();
     private final int maxChars;
+    private final int firstChunkMinChars;
+    private boolean firstChunkEmitted;
 
     public LlmStreamingSentenceBuffer(int maxChars) {
+        this(maxChars, maxChars);
+    }
+
+    public LlmStreamingSentenceBuffer(int maxChars, int firstChunkMinChars) {
         this.maxChars = Math.max(16, maxChars);
+        this.firstChunkMinChars = Math.max(8, Math.min(this.maxChars, firstChunkMinChars));
     }
 
     public List<String> feed(String delta) {
@@ -39,12 +46,22 @@ public final class LlmStreamingSentenceBuffer {
     }
 
     private void drainCompleteSentences(List<String> out) {
+        if (!firstChunkEmitted && pending.length() >= firstChunkMinChars) {
+            String chunk = SpeakTextLimiter.limit(pending.toString(), maxChars);
+            if (StringUtils.hasText(chunk)) {
+                out.add(chunk);
+                pending.delete(0, chunk.length());
+                firstChunkEmitted = true;
+                return;
+            }
+        }
         // 电话场景：凑够 maxChars 即出句，不等到句号，便于边生成边 TTS
         if (pending.length() >= maxChars) {
             String chunk = SpeakTextLimiter.limit(pending.toString(), maxChars);
             if (StringUtils.hasText(chunk)) {
                 out.add(chunk);
                 pending.delete(0, chunk.length());
+                firstChunkEmitted = true;
                 return;
             }
         }
@@ -59,12 +76,14 @@ public final class LlmStreamingSentenceBuffer {
                 continue;
             }
             emitWithinLimit(out, sentence);
+            firstChunkEmitted = true;
         }
         if (pending.length() > maxChars * 2) {
             String chunk = SpeakTextLimiter.limit(pending.toString(), maxChars);
             if (StringUtils.hasText(chunk)) {
                 out.add(chunk);
                 pending.delete(0, chunk.length());
+                firstChunkEmitted = true;
             }
         }
     }

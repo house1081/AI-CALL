@@ -3,6 +3,7 @@ package com.aicall.service;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.config.FreeSwitchProperties;
 import com.aicall.util.FsHostOs;
+import com.aicall.util.OralScriptNormalizer;
 import com.aicall.util.StreamTextSplitter;
 import com.aicall.util.TelephonyWavUtil;
 import com.aicall.util.WavDurationUtil;
@@ -43,11 +44,32 @@ public class VoicePlaybackService {
     private volatile boolean uuidExecuteUnsupported;
 
     /**
+     * 金融外呼分句播报：每句单独 CosyVoice 合成，句间插入静音后合并一次播放（避免连续朗读感）。
+     */
+    public boolean playTextSequential(String fsUuid, String text) {
+        if (!StringUtils.hasText(fsUuid) || !StringUtils.hasText(text)) {
+            return false;
+        }
+        int maxChars = Math.max(16, aiVoiceProperties.getMaxSpeakChars());
+        List<String> sentences = OralScriptNormalizer.splitForPlayback(text, maxChars);
+        if (sentences.isEmpty()) {
+            return false;
+        }
+        if (sentences.size() == 1) {
+            return playOnChannel(fsUuid, sentences.get(0));
+        }
+        return playMergedSentencesWithPauses(fsUuid, sentences);
+    }
+
+    /**
      * 长话术：按句合成后合并为一条 wav 再播放，避免多次 displace/stop 造成中间空白。
      */
     public boolean playTextStreaming(String fsUuid, String text) {
         if (!StringUtils.hasText(fsUuid) || !StringUtils.hasText(text)) {
             return false;
+        }
+        if (aiVoiceProperties.isTtsSentenceSequentialEnabled()) {
+            return playTextSequential(fsUuid, text);
         }
         if (!aiVoiceProperties.isTtsStreamEnabled()) {
             return playOnChannel(fsUuid, text);
@@ -57,10 +79,10 @@ public class VoicePlaybackService {
         if (sentences.size() <= 1) {
             return playOnChannel(fsUuid, text);
         }
-        return playMergedSentencesOnChannel(fsUuid, sentences);
+        return playMergedSentencesWithPauses(fsUuid, sentences);
     }
 
-    private boolean playMergedSentencesOnChannel(String fsUuid, List<String> sentences) {
+    private boolean playMergedSentencesWithPauses(String fsUuid, List<String> sentences) {
         synchronized (channelLock(fsUuid)) {
             if (!eslService.uuidExists(fsUuid)) {
                 return false;
@@ -68,12 +90,18 @@ public class VoicePlaybackService {
             stopChannelPlayback(fsUuid);
             List<byte[]> wavParts = new ArrayList<>();
             try {
-                for (String sentence : sentences) {
+                for (int i = 0; i < sentences.size(); i++) {
+                    String sentence = sentences.get(i);
                     if (!eslService.uuidExists(fsUuid)) {
                         break;
                     }
                     Path wav = localPromptWavService.synthesizeToFile(fsUuid, sentence);
-                    wavParts.add(Files.readAllBytes(wav));
+                    byte[] part = Files.readAllBytes(wav);
+                    if (i < sentences.size() - 1) {
+                        int pauseMs = resolveInterSentencePauseMs(sentence);
+                        part = TelephonyWavUtil.appendSilenceMs(part, pauseMs);
+                    }
+                    wavParts.add(part);
                 }
                 if (wavParts.isEmpty()) {
                     return false;
@@ -83,7 +111,7 @@ public class VoicePlaybackService {
                 try {
                     Files.write(mergedFile, merged);
                     log.info("句级 TTS 已合并 uuid={} 段数={} 总时长约{}s",
-                            fsUuid, wavParts.size(),
+                            fsUuid, sentences.size(),
                             String.format("%.2f", WavDurationUtil.durationSeconds(merged)));
                     return playExistingWavInternal(fsUuid, mergedFile);
                 } finally {
@@ -94,6 +122,17 @@ public class VoicePlaybackService {
                 return playOnChannel(fsUuid, String.join("", sentences));
             }
         }
+    }
+
+    private int resolveInterSentencePauseMs(String sentence) {
+        if (!aiVoiceProperties.isTtsSmartPauseEnabled()) {
+            return Math.max(0, aiVoiceProperties.getTtsInterSentenceGapMs());
+        }
+        return OralScriptNormalizer.pauseMsAfter(
+                sentence,
+                aiVoiceProperties.getTtsClausePauseMs(),
+                aiVoiceProperties.getTtsSentenceEndPauseMs(),
+                aiVoiceProperties.getTtsInterSentenceGapMs());
     }
 
     /** 停止 TTS 播放（displace/break），录音前必须调用，否则听不到用户说话 */

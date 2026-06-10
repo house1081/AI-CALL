@@ -126,6 +126,20 @@ public class AiVoiceProperties {
     private int turnBasedPlaybackAsrTailMs = 600;
     /** 句间停顿 100~200ms */
     private int sentencePauseMs = 150;
+    /** 分句顺序播报：每句单独 TTS，句间留空白（金融外呼真人感） */
+    private boolean ttsSentenceSequentialEnabled = true;
+    /** 智能断句停顿：逗号/句号对应不同静音时长 */
+    private boolean ttsSmartPauseEnabled = true;
+    /** 逗号后停顿（毫秒） */
+    private int ttsClausePauseMs = 250;
+    /** 句号后停顿（毫秒） */
+    private int ttsSentenceEndPauseMs = 450;
+    /** 两句 TTS 之间额外换气空白（毫秒） */
+    private int ttsInterSentenceGapMs = 400;
+    /** 根据客户话术动态切换 instruction/语速 */
+    private boolean ttsDynamicProsodyEnabled = true;
+    /** FS 背景办公音参考音量 0~1（需在 FS 拨号方案配置，此处仅文档/日志） */
+    private double backgroundAudioVolume = 0.22;
     private boolean dialogEnabled = true;
     /**
      * true=每轮客户话术后都调大模型（带历史上下文），规则只做槽位摘要/挂断，不替模型生成回复。
@@ -141,6 +155,8 @@ public class AiVoiceProperties {
     /** true=LLM 流式过程中按句 TTS；false=等 LLM 全文后再 cosyvoice 播报 */
     /** false=每轮整段 TTS 一次，避免多句流式互相 stop 只听到半句 */
     private boolean dialogLlmStreamTts = false;
+    /** 流式首句 TTS 触发字数（小于 max-speak-chars，更快开口） */
+    private int streamTtsFirstChunkChars = 14;
     /** 独立线程池调用大模型最长等待（秒） */
     private int dialogLlmTimeoutSec = 55;
     /** 分段模式：客户长时间无有效 ASR 时主动 gentle 询问 */

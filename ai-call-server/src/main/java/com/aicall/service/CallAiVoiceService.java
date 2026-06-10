@@ -4,6 +4,7 @@ import com.aicall.common.DialogSlotHelper;
 import com.aicall.common.ForcedHangupRules;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.config.FreeSwitchProperties;
+import com.aicall.util.OralScriptNormalizer;
 import com.aicall.util.SpeakTextLimiter;
 import com.aicall.util.StreamTtsRemainder;
 import com.aicall.dto.AiChatMessage;
@@ -16,6 +17,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -29,6 +33,12 @@ import java.util.concurrent.TimeoutException;
 @RequiredArgsConstructor
 public class CallAiVoiceService {
 
+    private static final Executor STREAM_TTS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "stream-tts");
+        t.setDaemon(true);
+        return t;
+    });
+
     private final AiVoiceProperties aiVoiceProperties;
     private final FreeSwitchProperties freeSwitchProperties;
     private final OllamaChatService ollamaChatService;
@@ -40,6 +50,7 @@ public class CallAiVoiceService {
     private final OpeningPlaybackGuard openingPlaybackGuard;
     private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
     private final DialogTurnRegistry dialogTurnRegistry;
+    private final TtsProsodyService ttsProsodyService;
 
     public void onCallAnswered(String fsUuid, Integer callRecordId) {
         if (!aiVoiceProperties.isEnabled() || !voiceRuntimeSettingsService.isPlayOpeningOnAnswer()) {
@@ -117,9 +128,19 @@ public class CallAiVoiceService {
             return r;
         }
         DialogTranscriptLog.userSpeechToText(req.getCallRecordId(), req.getFsUuid(), req.getUserText());
+        ttsProsodyService.bindForUserUtterance(req.getUserText());
+        try {
+            return voiceTurnDialog(req);
+        } finally {
+            ttsProsodyService.clear();
+        }
+    }
+
+    private AiChatResponse voiceTurnDialog(AiChatRequest req) throws Exception {
         long turnStart = System.currentTimeMillis();
         AtomicBoolean streamTtsStarted = new AtomicBoolean(false);
         AtomicReference<String> streamTtsPrefix = new AtomicReference<>("");
+        AtomicReference<CompletableFuture<Void>> streamFirstPlayFuture = new AtomicReference<>();
         Consumer<String> onSentence = null;
         if (aiVoiceProperties.isDialogLlmStream() && aiVoiceProperties.isDialogLlmStreamTts()
                 && req.getCallRecordId() != null && shouldPlayOnChannel(req.getFsUuid())) {
@@ -131,7 +152,8 @@ public class CallAiVoiceService {
                 streamTtsPrefix.set(chunk);
                 log.info("[对话TTS] 流式首句开播 uuid={} 距回合开始{}ms len={}",
                         req.getFsUuid(), System.currentTimeMillis() - turnStart, chunk.length());
-                playText(req.getFsUuid(), chunk);
+                String fsUuid = req.getFsUuid();
+                streamFirstPlayFuture.set(CompletableFuture.runAsync(() -> playText(fsUuid, chunk), STREAM_TTS_EXECUTOR));
             };
         }
         AiChatResponse r = ollamaChatService.chat(req, onSentence);
@@ -150,7 +172,7 @@ public class CallAiVoiceService {
                 if (Boolean.TRUE.equals(r.getShouldHangup()) && StringUtils.hasText(r.getEndWords())) {
                     playFixedEnding(req.getFsUuid(), req.getCallRecordId(), r.getEndWords());
                 } else if (streamTtsStarted.get()) {
-                    playStreamTtsTail(req.getFsUuid(), toPlay, streamTtsPrefix.get());
+                    playStreamTtsTail(req.getFsUuid(), toPlay, streamTtsPrefix.get(), streamFirstPlayFuture.get());
                     r.setPlaybackWaitHandled(true);
                 } else {
                     playText(req.getFsUuid(), toPlay);
@@ -201,7 +223,11 @@ public class CallAiVoiceService {
     }
 
     /** 首句流式已播：等首句结束再分段补播剩余，并在本方法内等待全部播完 */
-    private void playStreamTtsTail(String fsUuid, String fullReply, String streamedPrefix) throws Exception {
+    private void playStreamTtsTail(String fsUuid, String fullReply, String streamedPrefix,
+                                   CompletableFuture<Void> firstPlayFuture) throws Exception {
+        if (firstPlayFuture != null) {
+            firstPlayFuture.join();
+        }
         String prefix = streamedPrefix != null ? streamedPrefix.trim() : "";
         if (StringUtils.hasText(prefix)) {
             log.info("[对话TTS] 等待流式首句播完 uuid={} len={}", fsUuid, prefix.length());
@@ -212,15 +238,12 @@ public class CallAiVoiceService {
             log.info("[对话TTS] 流式首句已覆盖全文 uuid={}", fsUuid);
             return;
         }
-        List<String> chunks = SpeakTextLimiter.splitWithinLimit(remainder, aiVoiceProperties.getMaxSpeakChars());
-        log.info("[对话TTS] 流式补播 uuid={} 剩余len={} 分段={}", fsUuid, remainder.length(), chunks.size());
-        for (String chunk : chunks) {
-            if (!shouldPlayOnChannel(fsUuid)) {
-                return;
-            }
-            playText(fsUuid, chunk);
-            voicePlaybackService.waitPlaybackFinished(fsUuid, chunk, null);
+        log.info("[对话TTS] 流式补播 uuid={} 剩余len={}", fsUuid, remainder.length());
+        if (!shouldPlayOnChannel(fsUuid)) {
+            return;
         }
+        voicePlaybackService.playTextSequential(fsUuid, remainder);
+        voicePlaybackService.waitPlaybackFinished(fsUuid, remainder, null);
     }
 
     /** 固定结束语：仅播预录音，不调 TTS */
@@ -265,7 +288,10 @@ public class CallAiVoiceService {
             return;
         }
         String safe = SpeakTextLimiter.limit(text, aiVoiceProperties.getMaxSpeakChars());
-        boolean ok = aiVoiceProperties.isTtsStreamEnabled()
+        safe = OralScriptNormalizer.normalize(safe);
+        boolean ok = aiVoiceProperties.isTtsSentenceSequentialEnabled()
+                ? voicePlaybackService.playTextSequential(fsUuid, safe)
+                : aiVoiceProperties.isTtsStreamEnabled()
                 ? voicePlaybackService.playTextStreaming(fsUuid, safe)
                 : voicePlaybackService.playOnChannel(fsUuid, safe);
         if (!ok) {

@@ -108,14 +108,23 @@ ai-voice:
   tts-clone-voice-id: 
   # v3.5-plus 须用复刻 voice_id；SSE + PCM；支持 Instruct（中文固定句式）
   tts-response-format: audio
-  tts-speech-rate: 1.05
-  tts-pitch-rate: 1.02
-  tts-volume: 80
-  # Instruct 示例：场景+情感（外呼推销可用「广告促销」）
-  tts-instruction: 你正在进行广告促销，你说话的情感是 neutral。
+  tts-speech-rate: 0.92
+  tts-pitch-rate: 1.0
+  tts-volume: 100
+  # CosyVoice Instruct：金融信贷顾问专用情感指令
+  tts-instruction: 模仿资深金融信贷顾问语气，语气亲切稳重、自然流畅；介绍产品优势时适当加重语气、放慢语速；语句之间带自然短暂停顿，模拟真人说话的换气感，不要机械朗读，整体语气真诚不推销感过重。
+  # 分句顺序 TTS：每句单独合成，句间智能停顿（逗号约250ms、句号约450ms）
+  tts-sentence-sequential-enabled: true
+  tts-smart-pause-enabled: true
+  tts-clause-pause-ms: 250
+  tts-sentence-end-pause-ms: 450
+  tts-inter-sentence-gap-ms: 400
+  tts-dynamic-prosody-enabled: true
+  # FS 侧背景办公音建议音量 0.2~0.25（在拨号方案/displace 配置）
+  background-audio-volume: 0.22
   playback-peak-ratio: 0.95
-  playback-tail-buffer-ms: 80
-  playback-post-stop-ms: 25
+  playback-tail-buffer-ms: 50
+  playback-post-stop-ms: 15
   tts-http-url: ""
   playback-base-url: http://127.0.0.1:8081
   fs-fetch-via-esl: true
@@ -137,6 +146,8 @@ ai-voice:
   speak-fallback-voices: en|callie,eng|flite
   # 单轮播报软上限（SpeakTextLimiter 按句号/逗号截断，保证语句完整）
   max-speak-chars: 36
+  # 流式首句 TTS 触发字数（越小开口越快，建议 12~18）
+  stream-tts-first-chunk-chars: 14
   # 整句一次性识别，杜绝流式等待延迟
   asr-mode: sentence
   asr-stream-enabled: false
@@ -161,7 +172,7 @@ ai-voice:
   asr-read-timeout-ms: 45000
   # ASR：句末静音与 user-silence-before-response-ms 对齐（说完一句再识别）
   asr-vad-enabled: true
-  asr-vad-silence-ms: 380
+  asr-vad-silence-ms: 280
   asr-vad-min-speech-ms: 200
   asr-vad-poll-ms: 15
   asr-vad-energy-threshold: 200
@@ -177,7 +188,7 @@ ai-voice:
   # 句末档位默认：stable=800ms | fast=380ms（任务/DB 可覆盖）
   silence-profile: fast
   # 用户句末静音 yml 兜底（实际以 silence-profile 为准）
-  user-silence-before-response-ms: 380
+  user-silence-before-response-ms: 280
   asr-record-max-ms: 12000
   asr-max-slice-sec: 4
   asr-language: zh-CN
@@ -206,7 +217,7 @@ ai-voice:
   opening-voice-precache-enabled: true
   opening-voice-cache-dir: ./uploads/tts/opening
   tts-phrase-cache-dir: ./uploads/tts/phrases
-  tts-min-interval-ms: 100
+  tts-min-interval-ms: 50
   tts-rate-limit-cooldown-ms: 10000
   tts-rate-limit-retries: 3
   # 服务就绪后延迟预合成开场白（毫秒），过大会拖慢首通；保存/启用话术会立即触发

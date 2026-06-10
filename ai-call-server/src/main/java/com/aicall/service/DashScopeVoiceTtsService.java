@@ -300,11 +300,12 @@ public class DashScopeVoiceTtsService {
             input.put("format", "wav");
             input.put("sample_rate", synthRate);
         }
-        input.put("rate", aiVoiceProperties.getTtsSpeechRate());
+        input.put("rate", resolveSpeechRate());
         input.put("pitch", aiVoiceProperties.getTtsPitchRate());
         input.put("volume", aiVoiceProperties.getTtsVolume());
-        if (!model.contains("v1") && StringUtils.hasText(aiVoiceProperties.getTtsInstruction())) {
-            input.put("instruction", aiVoiceProperties.getTtsInstruction().trim());
+        String instruction = resolveInstruction();
+        if (!model.contains("v1") && StringUtils.hasText(instruction)) {
+            input.put("instruction", instruction.trim());
         }
         Map<String, Object> parameters = new LinkedHashMap<>();
         if (sse) {
@@ -317,6 +318,22 @@ public class DashScopeVoiceTtsService {
             body.put("parameters", parameters);
         }
         return body;
+    }
+
+    private double resolveSpeechRate() {
+        TtsProsodyContext.Prosody p = TtsProsodyContext.current();
+        if (p != null && p.getSpeechRate() > 0) {
+            return p.getSpeechRate();
+        }
+        return aiVoiceProperties.getTtsSpeechRate();
+    }
+
+    private String resolveInstruction() {
+        TtsProsodyContext.Prosody p = TtsProsodyContext.current();
+        if (p != null && StringUtils.hasText(p.getInstruction())) {
+            return p.getInstruction();
+        }
+        return aiVoiceProperties.getTtsInstruction();
     }
 
     private void appendSseAudioChunk(ByteArrayOutputStream audio, String payload) throws Exception {

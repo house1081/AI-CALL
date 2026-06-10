@@ -8,6 +8,7 @@ import com.aicall.config.AiVoiceProperties;
 import com.aicall.config.DialogRagProperties;
 import com.aicall.dto.*;
 import com.aicall.util.LlmStreamingSentenceBuffer;
+import com.aicall.util.OralScriptNormalizer;
 import com.aicall.util.SpeakTextLimiter;
 import com.aicall.entity.AiModelConfig;
 import com.aicall.entity.AiPrompt;
@@ -255,7 +256,8 @@ public class OllamaChatService {
         try {
             if (stream) {
                 LlmStreamingSentenceBuffer sentenceBuf = new LlmStreamingSentenceBuffer(
-                        aiVoiceProperties.getMaxSpeakChars());
+                        aiVoiceProperties.getMaxSpeakChars(),
+                        aiVoiceProperties.getStreamTtsFirstChunkChars());
                 rawReply = llmInvokeService.chatStreaming(messages, llmCfg, delta -> {
                     for (String sentence : sentenceBuf.feed(delta)) {
                         if (onSentence != null) {
@@ -506,7 +508,7 @@ public class OllamaChatService {
         if (!StringUtils.hasText(reply)) {
             return reply;
         }
-        String t = reply.trim();
+        String t = OralScriptNormalizer.normalize(reply.trim());
         int max = aiVoiceProperties.getMaxSpeakChars();
         int firstQ = indexOfQuestionMark(t);
         if (firstQ >= 0 && firstQ < t.length() - 1) {
@@ -784,8 +786,12 @@ public class OllamaChatService {
         }
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(history, currentUser);
         sb.append(DialogSlotHelper.promptSummary(slots));
-        sb.append("\n\n【说话风格】像真人电话顾问：语气自然、亲切、不背稿；可用「嗯」「好的」「没事」「不好意思啊」；")
-                .append("一次只问一个问题；禁止机械套话、禁止连续两个问号；客户听不清或回答含糊时，换种说法再问，不要复制上一轮原句。");
+        sb.append("\n\n【说话风格】像资深金融信贷顾问打电话：亲切稳重、自然流畅，不要背稿；")
+                .append("拒绝长句和书面语，改成口语短句，用逗号句号控制停顿；")
+                .append("核心卖点（额度、利息、放款、无杂费）单独成句；")
+                .append("禁止「诸如、综上所述、也就是说」；一次只问一个问题；")
+                .append("可用「嗯」「好的」「没事」「不好意思啊」；禁止机械套话、禁止连续两个问号；")
+                .append("客户听不清或回答含糊时，换种说法再问，不要复制上一轮原句。");
         sb.append("\n【实时对话】严格轮次：你只在客户说完并停顿后才回复；每次1～2句口语，每句必须说完整，总长不超过")
                 .append(aiVoiceProperties.getMaxSpeakChars()).append("字；已通话")
                 .append(elapsedSeconds).append("秒（上限")
