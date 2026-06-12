@@ -77,22 +77,24 @@ public class OpeningPlaybackService {
         return true;
     }
 
-    /** 挂断/结束语：仅预录音，不调 TTS */
+    /** 挂断/结束语：预录音 → CosyVoice/本地 SAPI，播完再返回 */
     public boolean playEnding(String uuid, Integer callRecordId, String endText) throws Exception {
         if (!StringUtils.hasText(uuid) || !StringUtils.hasText(endText) || !eslService.uuidExists(uuid)) {
             return false;
         }
         boolean played = fixedPhrasePlaybackService.playCachedEnding(uuid, callRecordId, endText);
         if (!played) {
-            log.warn("[结束语] 无预录音，改用实时 CosyVoice TTS uuid={}", uuid);
+            log.warn("[结束语] 无预录音，尝试 CosyVoice/本地播报 uuid={}", uuid);
             played = aiVoiceProperties.isTtsStreamEnabled()
                     ? voicePlaybackService.playTextStreaming(uuid, endText)
                     : voicePlaybackService.playOnChannel(uuid, endText);
         }
         if (played) {
             voicePlaybackService.waitPlaybackFinished(uuid, endText);
+            callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
+            return true;
         }
-        return played;
+        return false;
     }
 
     private boolean tryPlayCachedOpening(String uuid) throws Exception {

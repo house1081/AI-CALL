@@ -12,6 +12,16 @@ public class VoiceRuntimeConfigDto {
     private Double effectiveVadThreshold;
     /** CosyVoice 复刻 voice_id */
     private String cosyvoiceCloneVoiceId;
+    /** clone | system */
+    private String ttsVoiceMode;
+    /** 系统预置音色（如 longanyang） */
+    private String cosyvoiceSystemVoice;
+    /** 只读：当前生效的合成 voice 参数 */
+    private String effectiveTtsVoice;
+    /** 只读：当前生效的合成 model */
+    private String effectiveTtsModel;
+    /** 只读：可选系统预置音色列表 */
+    private java.util.List<CosyVoiceSystemVoiceOptionDto> systemVoiceOptions;
     /** 只读：yml 默认 CosyVoice 复刻 ID（库为空时展示） */
     private String defaultCosyvoiceCloneVoiceId;
     /** 接通后是否播报开场白 */

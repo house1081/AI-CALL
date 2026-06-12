@@ -27,7 +27,7 @@ public final class SilenceProfile {
 
     public static Params resolve(String profile) {
         if (FAST.equalsIgnoreCase(safe(profile))) {
-            return new Params(FAST, 280, 60, 0.26);
+            return new Params(FAST, 220, 50, 0.26);
         }
         return new Params(STABLE, 800, 120, 0.35);
     }

@@ -1,6 +1,7 @@
 package com.aicall.service;
 
 import com.aicall.config.AiVoiceProperties;
+import com.aicall.common.TtsSynthesisException;
 import com.aicall.config.FreeSwitchProperties;
 import com.aicall.util.FsHostOs;
 import com.aicall.util.OralScriptNormalizer;
@@ -42,6 +43,27 @@ public class VoicePlaybackService {
 
     /** park 通道上 uuid_execute 不可用（日志：Command not found），探测后跳过 */
     private volatile boolean uuidExecuteUnsupported;
+
+    /**
+     * 预合成 wav（供流式 TTS 首句播放期间并行合成剩余内容）。
+     */
+    public Path synthesizeToFile(String fsUuid, String text) throws Exception {
+        return localPromptWavService.synthesizeToFile(fsUuid, text);
+    }
+
+    /** 播放已合成的 wav 文件 */
+    public boolean playSynthesizedWav(String fsUuid, Path wav) {
+        if (!StringUtils.hasText(fsUuid) || wav == null) {
+            return false;
+        }
+        synchronized (channelLock(fsUuid)) {
+            if (!eslService.uuidExists(fsUuid)) {
+                return false;
+            }
+            stopChannelPlayback(fsUuid);
+            return playExistingWavInternal(fsUuid, wav);
+        }
+    }
 
     /**
      * 金融外呼分句播报：每句单独 CosyVoice 合成，句间插入静音后合并一次播放（避免连续朗读感）。
@@ -117,6 +139,12 @@ public class VoicePlaybackService {
                 } finally {
                     Files.deleteIfExists(mergedFile);
                 }
+            } catch (TtsSynthesisException e) {
+                if (e.isRateLimited()) {
+                    log.warn("句级 TTS 限流，回退整段本地播报: {}", e.getMessage());
+                    return playOnChannel(fsUuid, String.join("", sentences));
+                }
+                throw e;
             } catch (Exception e) {
                 log.warn("合并句级 TTS 失败，回退整段播报: {}", e.getMessage());
                 return playOnChannel(fsUuid, String.join("", sentences));
@@ -377,9 +405,14 @@ public class VoicePlaybackService {
                 }
             }
             return broadcastPlayback(fsUuid, url, "local-wav-http");
+        } catch (TtsSynthesisException e) {
+            throw e;
         } catch (Exception e) {
+            if (TtsSynthesisException.isRateLimitedMessage(e.getMessage())) {
+                throw new TtsSynthesisException("TTS 合成失败: " + e.getMessage(), e, true);
+            }
             log.warn("本地 wav 生成失败: {}", e.getMessage());
-            return false;
+            throw new TtsSynthesisException("TTS 合成失败: " + e.getMessage(), e, false);
         }
     }
 

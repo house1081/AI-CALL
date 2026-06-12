@@ -48,7 +48,7 @@ public class FixedPhraseVoiceAdminService {
         }
 
         if (StringUtils.hasText(active.getOpeningRemarks())) {
-            openingVoiceCacheService.regenerateAll(active);
+            openingVoiceCacheService.ensureActiveOpeningCached(true);
         }
         endingVoiceCacheService.regenerateAll(active);
 

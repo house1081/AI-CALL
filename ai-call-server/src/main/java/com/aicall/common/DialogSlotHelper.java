@@ -546,6 +546,50 @@ public final class DialogSlotHelper {
         return isPunctuationOnly(t) || isGreetingOnly(t);
     }
 
+    /**
+     * 客户是在提问/追问/纠正，或 RAG 已命中 FAQ：应走 LLM+上下文，勿强行推进主线话术。
+     */
+    public static boolean prefersContextualLlmReply(String userText, boolean ragHasPositiveMatch) {
+        if (!StringUtils.hasText(userText)) {
+            return false;
+        }
+        String u = userText.trim();
+        if (isFollowUpComplaint(u)) {
+            return true;
+        }
+        if (isExplicitCustomerQuestion(u)) {
+            return true;
+        }
+        return ragHasPositiveMatch;
+    }
+
+    /** 客户在问具体问题（利率/额度/身份/怎么办理等） */
+    public static boolean isExplicitCustomerQuestion(String userText) {
+        if (!StringUtils.hasText(userText)) {
+            return false;
+        }
+        String u = userText.trim();
+        if (ForcedHangupRules.isIdentityInquiry(u)
+                || ForcedHangupRules.isCompanyOrAddressInquiry(u)
+                || ForcedHangupRules.isServiceInquiry(u)
+                || ForcedHangupRules.isClarificationQuestion(u)
+                || ForcedHangupRules.isHearingIssue(u)) {
+            return true;
+        }
+        return u.contains("利率") || u.contains("利息") || u.contains("额度")
+                || u.contains("多少钱") || u.contains("多少万") || u.contains("怎么贷")
+                || u.contains("怎么办") || u.contains("怎么办理") || u.contains("多久")
+                || u.contains("在哪") || u.contains("哪里") || u.contains("谁")
+                || (u.contains("多少") && (u.contains("?") || u.contains("？") || u.contains("吗") || u.contains("呢")))
+                || u.contains("为什么") || u.contains("什么意思");
+    }
+
+    public static boolean isFollowUpComplaint(String userText) {
+        return userText.contains("说过了") || userText.contains("我就问") || userText.contains("没回答")
+                || userText.contains("答非所问") || userText.contains("你还没") || userText.contains("听不懂")
+                || userText.contains("听不明白") || userText.contains("别绕") || userText.contains("直接说");
+    }
+
     public static boolean isFillerOnly(String t) {
         if (!StringUtils.hasText(t)) {
             return true;

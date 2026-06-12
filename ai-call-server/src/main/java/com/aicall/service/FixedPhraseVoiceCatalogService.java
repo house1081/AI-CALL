@@ -25,18 +25,20 @@ public class FixedPhraseVoiceCatalogService {
     private final AiVoiceProperties aiVoiceProperties;
     private final ObjectProvider<CosyVoiceVoiceEnrollmentService> cosyVoiceEnrollmentProvider;
 
-    /** 外呼实际使用的 CosyVoice voice_id */
+    /** 外呼实际使用的 CosyVoice voice 参数 */
     public String resolveActiveVoiceId() {
-        String db = voiceRuntimeSettingsService.getCosyvoiceCloneVoiceId();
-        if (StringUtils.hasText(db)) {
-            return db.trim();
-        }
-        String yml = aiVoiceProperties.getTtsCloneVoiceId();
-        return StringUtils.hasText(yml) ? yml.trim() : "";
+        return voiceRuntimeSettingsService.getEffectiveTtsVoice();
     }
 
     /** 需要预生成开场白/结束语的全部音色（去重、保序） */
     public List<String> listAllVoiceIds() {
+        if (voiceRuntimeSettingsService.isSystemVoiceMode()) {
+            String active = resolveActiveVoiceId();
+            if (StringUtils.hasText(active)) {
+                return List.of(active);
+            }
+            return List.of();
+        }
         Set<String> ids = new LinkedHashSet<>();
         addVoice(ids, resolveActiveVoiceId());
         addVoice(ids, aiVoiceProperties.getTtsCloneVoiceId());

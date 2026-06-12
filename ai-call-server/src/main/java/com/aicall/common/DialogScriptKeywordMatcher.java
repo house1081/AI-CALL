@@ -58,10 +58,38 @@ public final class DialogScriptKeywordMatcher {
                 if (u.contains(kw) && kw.length() > bestLen) {
                     best = rule;
                     bestLen = kw.length();
+                    continue;
+                }
+                if (matchesKeywordVariant(u, kw) && kw.length() > bestLen) {
+                    best = rule;
+                    bestLen = kw.length();
                 }
             }
         }
         return best;
+    }
+
+    /** 口语变体：如「利息大概多少」命中规则「利息多少」 */
+    private static boolean matchesKeywordVariant(String userText, String keyword) {
+        if (!StringUtils.hasText(keyword) || keyword.length() < 2) {
+            return false;
+        }
+        if (keyword.contains("利息") && userText.contains("利息")) {
+            return true;
+        }
+        if (keyword.contains("利率") && userText.contains("利率")) {
+            return true;
+        }
+        if (keyword.contains("额度") && userText.contains("额度")) {
+            return true;
+        }
+        if (keyword.contains("放款") && userText.contains("放款")) {
+            return true;
+        }
+        if (keyword.contains("征信") && userText.contains("征信")) {
+            return true;
+        }
+        return false;
     }
 
     public static boolean looksLikeRefuse(String userText) {

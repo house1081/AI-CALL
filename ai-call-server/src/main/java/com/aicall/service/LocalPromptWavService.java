@@ -1,5 +1,6 @@
 package com.aicall.service;
 
+import com.aicall.common.TtsSynthesisException;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.util.TelephonyWavUtil;
 import com.aicall.util.WavDurationUtil;
@@ -27,6 +28,23 @@ public class LocalPromptWavService {
     private final AiVoiceProperties aiVoiceProperties;
     private final TtsPhraseCacheService ttsPhraseCacheService;
 
+    /** 固定话术预录：CosyVoice 不可用或 418 时仅用 Windows SAPI（不再次请求云端） */
+    public Path synthesizeLocalFallbackToFile(Path out, String text) throws IOException {
+        if (!StringUtils.hasText(text)) {
+            return null;
+        }
+        Files.createDirectories(out.getParent());
+        if (tryWindowsSapi(text, out)) {
+            normalizeTelephonyWav(out);
+            return out;
+        }
+        if (!aiVoiceProperties.isEnableToneFallback()) {
+            return null;
+        }
+        writeBeepWav(out, 1500);
+        return out;
+    }
+
     public Path synthesizeToFile(String fsUuid, String text) throws IOException {
         Path dir = Paths.get("./uploads/tts");
         Files.createDirectories(dir);
@@ -34,8 +52,19 @@ public class LocalPromptWavService {
                 + "_" + System.currentTimeMillis() + ".wav";
         Path out = dir.resolve(name);
 
-        if (useCosyVoice() && ttsPhraseCacheService.synthesizeToFile(out, text) != null) {
-            return out;
+        if (useCosyVoice()) {
+            try {
+                if (ttsPhraseCacheService.synthesizeToFile(out, text) != null) {
+                    return out;
+                }
+            } catch (TtsSynthesisException e) {
+                if (e.isRateLimited()) {
+                    log.warn("[TTS] CosyVoice 限流，回退本地 SAPI/蜂鸣 uuid={}: {}",
+                            fsUuid, e.getMessage());
+                } else {
+                    throw e;
+                }
+            }
         }
         if (StringUtils.hasText(text) && tryWindowsSapi(text, out)) {
             normalizeTelephonyWav(out);

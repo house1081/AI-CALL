@@ -1,5 +1,8 @@
 package com.aicall.service;
 
+import com.aicall.common.CosyVoiceModelRules;
+import com.aicall.common.CosyVoiceSystemVoiceCatalog;
+import com.aicall.common.TtsSynthesisException;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.util.TelephonyWavUtil;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -70,6 +73,15 @@ public class DashScopeVoiceTtsService {
 
     /** 指定 CosyVoice voice_id 合成（多音色固定话术预生成） */
     public Path synthesizeToFile(Path out, String text, String voiceIdOverride) {
+        return synthesizeToFile(out, text, voiceIdOverride, false);
+    }
+
+    /** 固定话术预合成：不传 Instruct，降低 428 风险 */
+    public Path synthesizeFixedPhraseToFile(Path out, String text, String voiceIdOverride) {
+        return synthesizeToFile(out, text, voiceIdOverride, false);
+    }
+
+    private Path synthesizeToFile(Path out, String text, String voiceIdOverride, boolean useInstruction) {
         String apiKey = dashScopeApiKeyResolver.resolve();
         if (!StringUtils.hasText(apiKey) || !StringUtils.hasText(text)) {
             return null;
@@ -79,28 +91,30 @@ public class DashScopeVoiceTtsService {
             for (int attempt = 0; attempt <= maxRetries; attempt++) {
                 try {
                     throttleBeforeRequest();
-                    byte[] raw = useSseStream() ? synthesizeAudioBytesSse(apiKey, text, voiceIdOverride)
-                            : synthesizeAudioBytesSync(apiKey, text, voiceIdOverride);
+                    byte[] raw = useSseStream() ? synthesizeAudioBytesSse(apiKey, text, voiceIdOverride, useInstruction)
+                            : synthesizeAudioBytesSync(apiKey, text, voiceIdOverride, useInstruction);
                     if (raw == null || raw.length < 320) {
                         log.warn("CosyVoice TTS 无有效音频字节 len={}", raw != null ? raw.length : 0);
-                        return null;
+                        throw new TtsSynthesisException("CosyVoice 无有效音频", false);
                     }
                     byte[] telephony = toTelephonyWav(raw);
                     telephony = TelephonyWavUtil.normalizeWavPeak(telephony, 0.9);
                     Files.write(out, telephony);
                     log.info("CosyVoice 已合成 8k/mono/16bit wav {} bytes model={} voice={}",
-                            telephony.length, resolveTtsModel(), resolveVoice(voiceIdOverride));
+                            telephony.length, resolveTtsModel(voiceIdOverride), resolveVoice(voiceIdOverride));
                     return out;
+                } catch (TtsSynthesisException e) {
+                    if (e.isRateLimited()) {
+                        markRateLimitCooldown();
+                        log.warn("CosyVoice 限流(428/429)，立即失败: {}", e.getMessage());
+                    }
+                    throw e;
                 } catch (Exception e) {
                     boolean rateLimited = isRateLimitError(e);
                     if (rateLimited) {
                         markRateLimitCooldown();
-                    }
-                    if (rateLimited && attempt < maxRetries) {
-                        long wait = (long) (1500 * Math.pow(2, attempt));
-                        log.warn("CosyVoice 限流(428)，{}ms 后重试 {}/{}", wait, attempt + 1, maxRetries);
-                        sleepQuiet(wait);
-                        continue;
+                        log.warn("CosyVoice 限流(428/429)，立即失败: {}", e.getMessage());
+                        throw new TtsSynthesisException("CosyVoice TTS 失败: " + e.getMessage(), e, true);
                     }
                     if (isRetryableNetwork(e) && attempt < maxRetries) {
                         log.warn("CosyVoice 网络异常，{}ms 后重试 {}/{}: {}",
@@ -109,24 +123,31 @@ public class DashScopeVoiceTtsService {
                         continue;
                     }
                     log.warn("CosyVoice TTS 异常: {}", e.getMessage());
-                    return null;
+                    logTtsFailureHint(voiceIdOverride, e);
+                    throw new TtsSynthesisException("CosyVoice TTS 失败: " + e.getMessage(), e, rateLimited);
                 }
             }
         }
-        return null;
+        throw new TtsSynthesisException("CosyVoice TTS 失败", false);
     }
 
     private void markRateLimitCooldown() {
-        long cooldown = Math.max(3000, aiVoiceProperties.getTtsRateLimitCooldownMs());
+        int configured = aiVoiceProperties.getTtsRateLimitCooldownMs();
+        if (configured <= 0) {
+            return;
+        }
+        long cooldown = Math.max(1000, configured);
         rateLimitCooldownUntilMs = System.currentTimeMillis() + cooldown;
     }
 
     private void throttleBeforeRequest() throws InterruptedException {
-        long now = System.currentTimeMillis();
-        long cooldownWait = rateLimitCooldownUntilMs - now;
-        if (cooldownWait > 0) {
-            log.info("CosyVoice 全局限流冷却，等待 {}ms", cooldownWait);
-            Thread.sleep(cooldownWait);
+        int cooldownMs = aiVoiceProperties.getTtsRateLimitCooldownMs();
+        if (cooldownMs > 0) {
+            long cooldownWait = rateLimitCooldownUntilMs - System.currentTimeMillis();
+            if (cooldownWait > 0) {
+                log.info("CosyVoice 全局限流冷却，等待 {}ms", cooldownWait);
+                Thread.sleep(cooldownWait);
+            }
         }
         int minGap = Math.max(0, aiVoiceProperties.getTtsMinIntervalMs());
         if (minGap > 0) {
@@ -140,8 +161,10 @@ public class DashScopeVoiceTtsService {
     }
 
     private static boolean isRateLimitError(Exception e) {
-        String msg = e.getMessage();
-        return msg != null && (msg.contains("428") || msg.contains("Throttling") || msg.contains("rate limit"));
+        if (e instanceof TtsSynthesisException t) {
+            return t.isRateLimited();
+        }
+        return TtsSynthesisException.isRateLimitedMessage(e.getMessage());
     }
 
     private static boolean isRetryableNetwork(Exception e) {
@@ -165,12 +188,12 @@ public class DashScopeVoiceTtsService {
     }
 
     public String voiceCacheSignature(String voiceIdOverride) {
-        return resolveTtsModel() + "|" + resolveVoice(voiceIdOverride);
+        return resolveTtsModel(voiceIdOverride) + "|" + resolveVoice(voiceIdOverride);
     }
 
     /** 管理端展示：固定话术预生成使用的 CosyVoice 模型 */
     public String effectiveTtsModel() {
-        return resolveTtsModel();
+        return resolveTtsModel(null);
     }
 
     /** 管理端展示：固定话术预生成使用的 CosyVoice 音色 */
@@ -191,8 +214,9 @@ public class DashScopeVoiceTtsService {
     /**
      * 非流式：返回 output.audio.url，下载后转 8k 电话 wav。
      */
-    private byte[] synthesizeAudioBytesSync(String apiKey, String text, String voiceIdOverride) throws Exception {
-        Map<String, Object> body = buildTtsRequestBody(text, false, voiceIdOverride);
+    private byte[] synthesizeAudioBytesSync(String apiKey, String text, String voiceIdOverride, boolean useInstruction)
+            throws Exception {
+        Map<String, Object> body = buildTtsRequestBody(text, false, voiceIdOverride, useInstruction);
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(TTS_URL))
                 .timeout(Duration.ofSeconds(28))
@@ -205,8 +229,8 @@ public class DashScopeVoiceTtsService {
         String respBody = response.body();
         if (response.statusCode() != 200) {
             if (response.statusCode() == 429 || response.statusCode() == 428
-                    || (respBody != null && (respBody.contains("428") || respBody.contains("Throttling")))) {
-                throw new IllegalStateException("CosyVoice rate limit: " + truncate(respBody, 200));
+                    || (respBody != null && TtsSynthesisException.isRateLimitedMessage(respBody))) {
+                throw new TtsSynthesisException("CosyVoice rate limit: " + truncate(respBody, 200), true);
             }
             log.warn("CosyVoice 非流式失败 HTTP {}: {}", response.statusCode(), truncate(respBody, 300));
             return null;
@@ -244,8 +268,9 @@ public class DashScopeVoiceTtsService {
     /**
      * SSE 流式合成：Header {@code X-DashScope-SSE: enable}，逐段读取 {@code output.audio.data}。
      */
-    private byte[] synthesizeAudioBytesSse(String apiKey, String text, String voiceIdOverride) throws Exception {
-        Map<String, Object> body = buildTtsRequestBody(text, true, voiceIdOverride);
+    private byte[] synthesizeAudioBytesSse(String apiKey, String text, String voiceIdOverride, boolean useInstruction)
+            throws Exception {
+        Map<String, Object> body = buildTtsRequestBody(text, true, voiceIdOverride, useInstruction);
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(TTS_URL))
@@ -262,8 +287,8 @@ public class DashScopeVoiceTtsService {
         if (response.statusCode() != 200) {
             String err = readAll(response.body());
             if (response.statusCode() == 429 || response.statusCode() == 428
-                    || (err != null && (err.contains("428") || err.contains("Throttling")))) {
-                throw new IllegalStateException("CosyVoice rate limit: " + truncate(err, 200));
+                    || (err != null && TtsSynthesisException.isRateLimitedMessage(err))) {
+                throw new TtsSynthesisException("CosyVoice rate limit: " + truncate(err, 200), true);
             }
             log.warn("CosyVoice SSE 失败 HTTP {}: {}", response.statusCode(), truncate(err, 300));
             return null;
@@ -287,11 +312,12 @@ public class DashScopeVoiceTtsService {
         return audio.size() > 0 ? audio.toByteArray() : null;
     }
 
-    private Map<String, Object> buildTtsRequestBody(String text, boolean sse, String voiceIdOverride) {
+    private Map<String, Object> buildTtsRequestBody(String text, boolean sse, String voiceIdOverride,
+                                                    boolean useInstruction) {
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("text", trimText(text));
         input.put("voice", resolveVoice(voiceIdOverride));
-        String model = resolveTtsModel().toLowerCase();
+        String model = resolveTtsModel(voiceIdOverride).toLowerCase();
         int synthRate = resolveSynthSampleRate();
         if (sse || !model.contains("v1")) {
             input.put("format", "pcm");
@@ -303,8 +329,8 @@ public class DashScopeVoiceTtsService {
         input.put("rate", resolveSpeechRate());
         input.put("pitch", aiVoiceProperties.getTtsPitchRate());
         input.put("volume", aiVoiceProperties.getTtsVolume());
-        String instruction = resolveInstruction();
-        if (!model.contains("v1") && StringUtils.hasText(instruction)) {
+        String instruction = useInstruction ? resolveInstruction() : "";
+        if (!model.contains("v1") && !model.contains("v2") && StringUtils.hasText(instruction)) {
             input.put("instruction", instruction.trim());
         }
         Map<String, Object> parameters = new LinkedHashMap<>();
@@ -312,7 +338,7 @@ public class DashScopeVoiceTtsService {
             parameters.put("response_format", "audio");
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", resolveTtsModel());
+        body.put("model", resolveTtsModel(voiceIdOverride));
         body.put("input", input);
         if (!parameters.isEmpty()) {
             body.put("parameters", parameters);
@@ -329,6 +355,9 @@ public class DashScopeVoiceTtsService {
     }
 
     private String resolveInstruction() {
+        if (!aiVoiceProperties.isTtsInstructionEnabled()) {
+            return "";
+        }
         TtsProsodyContext.Prosody p = TtsProsodyContext.current();
         if (p != null && StringUtils.hasText(p.getInstruction())) {
             return p.getInstruction();
@@ -339,7 +368,12 @@ public class DashScopeVoiceTtsService {
     private void appendSseAudioChunk(ByteArrayOutputStream audio, String payload) throws Exception {
         JsonNode root = objectMapper.readTree(payload);
         if (root.has("code") && StringUtils.hasText(root.get("code").asText())) {
-            throw new IllegalStateException(root.path("message").asText("CosyVoice SSE 错误"));
+            String msg = root.path("message").asText("CosyVoice SSE 错误");
+            if (TtsSynthesisException.isRateLimitedMessage(msg)
+                    || TtsSynthesisException.isRateLimitedMessage(root.get("code").asText())) {
+                throw new TtsSynthesisException("CosyVoice rate limit: " + msg, true);
+            }
+            throw new IllegalStateException(msg);
         }
         JsonNode audioNode = root.path("output").path("audio");
         if (audioNode.isMissingNode()) {
@@ -392,20 +426,66 @@ public class DashScopeVoiceTtsService {
     }
 
     private String resolveTtsModel() {
-        String model = aiVoiceProperties.getTtsModel();
-        if (!StringUtils.hasText(model)) {
-            return "cosyvoice-v2";
-        }
-        return model.trim();
+        return resolveTtsModel(null);
     }
 
-    /** v2/v3/v3.5 模型须用对应版本音色（v3.5 仅声音复刻/设计 ID） */
+    private String resolveTtsModel(String voiceIdOverride) {
+        if (!StringUtils.hasText(voiceIdOverride)) {
+            return voiceRuntimeSettingsService.getEffectiveTtsModel();
+        }
+        String voice = voiceIdOverride.trim();
+        if (CosyVoiceSystemVoiceCatalog.find(voice).isPresent()) {
+            return CosyVoiceSystemVoiceCatalog.resolveModel(voice);
+        }
+        if (isCloneVoiceId(voice)) {
+            return CosyVoiceModelRules.resolveCloneTtsModel(voice, aiVoiceProperties.getTtsModel());
+        }
+        return voiceRuntimeSettingsService.getEffectiveTtsModel();
+    }
+
+    private static boolean isCloneVoiceId(String voiceId) {
+        if (!StringUtils.hasText(voiceId)) {
+            return false;
+        }
+        String v = voiceId.trim().toLowerCase();
+        if (isKnownTtsModelName(v)) {
+            return false;
+        }
+        return v.contains("-cf-") || (v.startsWith("cosyvoice-v") && v.length() > 20);
+    }
+
+    private static boolean isKnownTtsModelName(String voiceId) {
+        String v = voiceId.trim().toLowerCase();
+        return v.equals("cosyvoice-v3.5-plus")
+                || v.equals("cosyvoice-v3.5-flash")
+                || v.equals("cosyvoice-v3-flash")
+                || v.equals("cosyvoice-v3-plus")
+                || v.equals("cosyvoice-v2-plus")
+                || v.equals("cosyvoice-v1");
+    }
+
+    private void logTtsFailureHint(String voiceIdOverride, Exception e) {
+        String model = resolveTtsModel(voiceIdOverride);
+        String voice = resolveVoice(voiceIdOverride);
+        String msg = e.getMessage() != null ? e.getMessage() : "";
+        if (msg.contains("418")) {
+            log.warn("CosyVoice 418：model={} voice={} — 常见原因：复刻 voice_id 已删除/过期、"
+                            + "与模型版本不匹配，或误填模型名当 voice_id；请在后台「CosyVoice 复刻」核对",
+                    model, voice);
+        }
+    }
+
+    /** v2/v3/v3.5 模型须用对应版本音色 */
     private String resolveVoice(String voiceIdOverride) {
         if (StringUtils.hasText(voiceIdOverride)) {
             return voiceIdOverride.trim();
         }
+        String effective = voiceRuntimeSettingsService.getEffectiveTtsVoice();
+        if (StringUtils.hasText(effective)) {
+            return effective.trim();
+        }
         String voice = aiVoiceProperties.getTtsVoice();
-        String model = resolveTtsModel().toLowerCase();
+        String model = resolveTtsModel(null).toLowerCase();
         if (model.contains("v3.5")) {
             String cloneId = voiceRuntimeSettingsService.getCosyvoiceCloneVoiceId();
             if (StringUtils.hasText(cloneId)) {
@@ -414,7 +494,7 @@ public class DashScopeVoiceTtsService {
             if (StringUtils.hasText(voice) && !isSystemVoiceName(voice)) {
                 return voice.trim();
             }
-            log.warn("cosyvoice-v3.5 未配置 tts-clone-voice-id，TTS 可能失败（v3.5 不支持 longanyang 等系统音色）");
+            log.warn("cosyvoice-v3.5 未配置复刻 voice_id，TTS 可能失败");
             return StringUtils.hasText(voice) ? voice.trim() : "";
         }
         if (!StringUtils.hasText(voice)) {

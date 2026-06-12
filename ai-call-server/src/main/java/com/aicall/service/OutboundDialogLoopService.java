@@ -1,5 +1,6 @@
 package com.aicall.service;
 
+import com.aicall.common.TtsSynthesisException;
 import com.aicall.common.CallStatus;
 import com.aicall.common.DialogSlotHelper;
 import com.aicall.common.ForcedHangupRules;
@@ -52,6 +53,7 @@ public class OutboundDialogLoopService {
     private final DialogCallContextService dialogCallContextService;
     private final DialogMainFlowService dialogMainFlowService;
     private final DialogTurnRegistry dialogTurnRegistry;
+    private final TtsFailureRecoveryService ttsFailureRecoveryService;
 
     private static final int MIN_SPEECH_WAV_BYTES = 4000;
 
@@ -70,7 +72,13 @@ public class OutboundDialogLoopService {
         try {
             endCallStatus = runDialogLoop(uuid, callRecordId, callStart, taskId);
         } catch (Exception e) {
-            log.warn("[对话] 异常 uuid={}: {}", uuid, e.getMessage());
+            TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+            if (tts != null) {
+                ttsFailureRecoveryService.playEndingAndHangup(uuid, callRecordId, tts);
+                endCallStatus = CallStatus.CONNECTED;
+            } else {
+                log.warn("[对话] 异常 uuid={}: {}", uuid, e.getMessage());
+            }
         } finally {
             if (humanTransferService.isTransferred(callRecordId)) {
                 callAiVoiceService.releaseCallResources(uuid);
@@ -208,7 +216,8 @@ public class OutboundDialogLoopService {
                                         uuid, silenceProbeCount);
                                 endedByHangup = true;
                                 endCallStatus = CallStatus.NO_ANSWER;
-                                eslService.hangupChannel(uuid, "silence-probe-max");
+                                ttsFailureRecoveryService.playEndingThenHangup(
+                                        uuid, callRecordId, ForcedHangupRules.END_WORDS, "silence-probe-max");
                                 break;
                             }
                         }
@@ -241,7 +250,8 @@ public class OutboundDialogLoopService {
                 if (fillerOnlyStreak >= 5) {
                     log.info("[对话] 客户连续语气词过多，结束对话 uuid={}", uuid);
                     endedByHangup = true;
-                    eslService.hangupChannel(uuid, "filler-streak");
+                    ttsFailureRecoveryService.playEndingThenHangup(
+                            uuid, callRecordId, LOOP_END_WORDS, "filler-streak");
                     break;
                 }
             } else {
@@ -254,7 +264,8 @@ public class OutboundDialogLoopService {
                     log.info("[对话] 客户重复应答过多或通道已断，结束对话 uuid={}", uuid);
                     if (eslService.uuidExists(uuid)) {
                         endedByHangup = true;
-                        eslService.hangupChannel(uuid, "duplicate-user");
+                        ttsFailureRecoveryService.playEndingThenHangup(
+                                uuid, callRecordId, LOOP_END_WORDS, "duplicate-user");
                     }
                     break;
                 }
@@ -340,7 +351,20 @@ public class OutboundDialogLoopService {
             if (Boolean.TRUE.equals(resp.getShouldHangup())) {
                 log.info("[对话] 规则挂断 uuid={}", uuid);
                 endedByHangup = true;
-                eslService.hangupChannel(uuid, "rule-hangup");
+                String playedText = StringUtils.hasText(resp.getEndWords()) ? resp.getEndWords() : resp.getReply();
+                if (!StringUtils.hasText(playedText)) {
+                    ttsFailureRecoveryService.playEndingThenHangup(
+                            uuid, callRecordId, ForcedHangupRules.END_WORDS, "rule-hangup");
+                } else {
+                    try {
+                        voicePlaybackService.waitPlaybackFinished(uuid, playedText);
+                    } catch (Exception e) {
+                        log.debug("[对话] 等待规则结束语 uuid={}: {}", uuid, e.getMessage());
+                    }
+                    if (eslService.uuidExists(uuid)) {
+                        eslService.hangupChannel(uuid, "rule-hangup");
+                    }
+                }
                 break;
             }
             if (!eslService.uuidExists(uuid)) {
@@ -409,17 +433,8 @@ public class OutboundDialogLoopService {
 
     private void playFarewellAndHangup(String uuid, Integer callRecordId,
                                        List<AiChatMessage> history, String goodbye) {
-        try {
-            DialogTranscriptLog.aiReply(callRecordId, uuid, goodbye, "farewell", true);
-            callDialogPersistService.appendAssistant(callRecordId, goodbye);
-            callAiVoiceService.playFixedEnding(uuid, callRecordId, goodbye);
-            voicePlaybackService.waitPlaybackFinished(uuid, goodbye);
-            appendHistory(history, "assistant", goodbye);
-            eslService.hangupChannel(uuid, "farewell");
-        } catch (Exception e) {
-            log.warn("[对话] 告别挂断失败 uuid={}: {}", uuid, e.getMessage());
-            eslService.hangupChannel(uuid, "farewell-error");
-        }
+        appendHistory(history, "assistant", goodbye);
+        ttsFailureRecoveryService.playEndingThenHangup(uuid, callRecordId, goodbye, "farewell");
     }
 
     /** 短段连续识别，有结果即返回，不等整句录满 */
@@ -478,17 +493,8 @@ public class OutboundDialogLoopService {
             "好的，今天先聊到这儿，有需要随时联系我们，祝您生活愉快，再见。";
 
     private void playGracefulLoopEnd(String uuid, Integer callRecordId, List<AiChatMessage> history) {
-        try {
-            DialogTranscriptLog.aiReply(callRecordId, uuid, LOOP_END_WORDS, "loop-end", true);
-            callDialogPersistService.appendAssistant(callRecordId, LOOP_END_WORDS);
-            callAiVoiceService.playFixedEnding(uuid, callRecordId, LOOP_END_WORDS);
-            voicePlaybackService.waitPlaybackFinished(uuid, LOOP_END_WORDS);
-            appendHistory(history, "assistant", LOOP_END_WORDS);
-            eslService.hangupChannel(uuid, "loop-end");
-        } catch (Exception e) {
-            log.warn("[对话] 轮次结束告别语失败 uuid={}: {}", uuid, e.getMessage());
-            eslService.hangupChannel(uuid, "loop-end-error");
-        }
+        appendHistory(history, "assistant", LOOP_END_WORDS);
+        ttsFailureRecoveryService.playEndingThenHangup(uuid, callRecordId, LOOP_END_WORDS, "loop-end");
     }
 
     private static boolean isDuplicateUserUtterance(List<AiChatMessage> history, String userText) {
@@ -526,20 +532,11 @@ public class OutboundDialogLoopService {
     }
 
     private void playDurationHangup(String uuid, Integer callRecordId, List<AiChatMessage> history) {
-        try {
-            HangupDecision dec = forcedHangupService.evaluateBeforeAi(callRecordId, null, null, null);
-            String goodbye = StringUtils.hasText(dec.getEndWords())
-                    ? dec.getEndWords() : ForcedHangupRules.DURATION_END_WORDS;
-            DialogTranscriptLog.aiReply(callRecordId, uuid, goodbye, "timeout", true);
-            callDialogPersistService.appendAssistant(callRecordId, goodbye);
-            callAiVoiceService.playFixedEnding(uuid, callRecordId, goodbye);
-            voicePlaybackService.waitPlaybackFinished(uuid, goodbye);
-            appendHistory(history, "assistant", goodbye);
-            eslService.hangupChannel(uuid, "duration-timeout");
-        } catch (Exception e) {
-            log.warn("[对话] 超时结束语播放失败 uuid={}: {}", uuid, e.getMessage());
-            eslService.hangupChannel(uuid, "duration-timeout-error");
-        }
+        HangupDecision dec = forcedHangupService.evaluateBeforeAi(callRecordId, null, null, null);
+        String goodbye = StringUtils.hasText(dec.getEndWords())
+                ? dec.getEndWords() : ForcedHangupRules.DURATION_END_WORDS;
+        appendHistory(history, "assistant", goodbye);
+        ttsFailureRecoveryService.playEndingThenHangup(uuid, callRecordId, goodbye, "duration-timeout");
     }
 
     private void endCall(String uuid, Integer callRecordId, long callStart, String recordUrl, int callStatus) {

@@ -226,7 +226,9 @@ public class OllamaChatService {
             }
         }
 
-        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)) {
+        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
+                && !DialogSlotHelper.prefersContextualLlmReply(req.getUserText(),
+                rag != null && rag.isHasPositiveMatch())) {
             String mainLine = dialogMainFlowService.nextMainLineAfterUser(req.getCallRecordId(), req.getUserText());
             if (StringUtils.hasText(mainLine)) {
                 log.info("[主线] 循序播报 recordId={} kb={} step={} user={}",
@@ -234,6 +236,12 @@ public class OllamaChatService {
                         req.getUserText().length() > 24 ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
                 return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
             }
+        } else if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
+                && DialogSlotHelper.prefersContextualLlmReply(req.getUserText(),
+                rag != null && rag.isHasPositiveMatch())) {
+            log.info("[主线] 客户提问/FAQ命中，跳过主线推进 recordId={} user={}",
+                    req.getCallRecordId(),
+                    req.getUserText().length() > 24 ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
         }
 
         String system = buildSystemPrompt(prompt, pre.getElapsedSeconds(), req.getHistory(),
@@ -710,6 +718,10 @@ public class OllamaChatService {
         if (!keywordMatched || req.getCallRecordId() == null || !dialogMainFlowService.isEnabled(kbId)) {
             return fallbackAnswer;
         }
+        if (DialogSlotHelper.isExplicitCustomerQuestion(req.getUserText())
+                || DialogSlotHelper.isFollowUpComplaint(req.getUserText())) {
+            return fallbackAnswer;
+        }
         if (fallbackAnswer.contains("再见") && fallbackAnswer.length() > 12) {
             return fallbackAnswer;
         }
@@ -797,6 +809,9 @@ public class OllamaChatService {
                 .append(elapsedSeconds).append("秒（上限")
                 .append(ForcedHangupRules.MAX_CALL_SECONDS).append("秒）。")
                 .append("必须结合下方对话历史与槽位回答，禁止脱离本通电话上下文。")
+                .append("【当前优先】必须先直接回应客户本句「").append(currentUser.trim())
+                .append("」，禁止无视提问继续按推销主线往下问。")
+                .append("客户问利率/利息/额度/办理方式/公司身份时，先给简明答案再酌情追问。")
                 .append("客户问「多少钱/利率/要多少」时：必须先说明额度或费用区间再给建议，禁止只重复客户说的数字。")
                 .append("客户问「50万还是80万」时：先答额度一般二十万到一百万、看资质，再问清他要五十万还是八十万。");
         if (history != null && !history.isEmpty()) {

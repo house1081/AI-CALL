@@ -12,6 +12,10 @@ public final class ForcedHangupRules {
 
     public static final String END_WORDS = "感谢您的时间，祝您生活愉快，再见。";
 
+    /** TTS 限流/异常时播放（须已预合成结束语缓存） */
+    public static final String TTS_FAILURE_END_WORDS =
+            "抱歉，线路有点忙，稍后工作人员再联系您，祝您生活愉快，再见。";
+
     /** 超时结束：先说明情况再礼貌告别 */
     public static final String DURATION_END_WORDS =
             "不好意思，本次通话已到五分钟，我先不打扰您了。如有需要欢迎随时联系我们，祝您生活愉快，再见。";

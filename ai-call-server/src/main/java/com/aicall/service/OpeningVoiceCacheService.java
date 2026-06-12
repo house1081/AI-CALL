@@ -50,7 +50,8 @@ public class OpeningVoiceCacheService {
 
     @EventListener(ApplicationReadyEvent.class)
     void warmOnApplicationReady() {
-        if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()) {
+        if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()
+                || !aiVoiceProperties.isOpeningVoicePrecacheOnStartup()) {
             return;
         }
         executor.submit(() -> {
@@ -140,7 +141,7 @@ public class OpeningVoiceCacheService {
             }
             long t0 = System.currentTimeMillis();
             Path tmp = voiceDir.resolve("opening_building.wav");
-            Path out = ttsPhraseCacheService.synthesizeToFile(tmp, text, voiceId);
+            Path out = ttsPhraseCacheService.synthesizeFixedPhraseToFile(tmp, text, voiceId);
             if (out == null || !Files.exists(out) || Files.size(out) <= 44) {
                 log.warn("[开场白缓存] 合成无有效音频 voice={} promptId={}", maskVoice(voiceId), prompt.getId());
                 return;
@@ -165,7 +166,12 @@ public class OpeningVoiceCacheService {
         if (!force && isReady()) {
             return;
         }
-        regenerateAll(active);
+        String voiceId = voiceCatalog.resolveActiveVoiceId();
+        if (!StringUtils.hasText(voiceId)) {
+            return;
+        }
+        log.info("[开场白缓存] 仅预合成当前音色 voice={}", maskVoice(voiceId));
+        regenerateForVoice(active, voiceId);
     }
 
     public boolean isReady() {

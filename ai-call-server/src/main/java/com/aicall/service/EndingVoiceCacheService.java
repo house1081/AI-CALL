@@ -1,5 +1,6 @@
 package com.aicall.service;
 
+import com.aicall.common.TtsSynthesisException;
 import com.aicall.common.ForcedHangupRules;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.entity.AiPrompt;
@@ -35,13 +36,19 @@ public class EndingVoiceCacheService {
     private static final String LOOP_END_WORDS =
             "好的，今天先聊到这儿，有需要随时联系我们，祝您生活愉快，再见。";
 
+    private static final String KEY_TTS_FAILURE = "tts_fail";
+
     private static final String KEY_DEFAULT = "default";
     private static final String KEY_DURATION = "duration";
     private static final String KEY_LOOP = "loop";
 
+    private static final List<String> ALL_ENDING_KEYS = List.of(
+            KEY_DEFAULT, KEY_DURATION, KEY_LOOP, KEY_TTS_FAILURE);
+
     private final AiVoiceProperties aiVoiceProperties;
     private final TtsPhraseCacheService ttsPhraseCacheService;
     private final DashScopeVoiceTtsService dashScopeVoiceTtsService;
+    private final LocalPromptWavService localPromptWavService;
     private final AiPromptMapper aiPromptMapper;
     private final FixedPhraseVoiceCatalogService voiceCatalog;
 
@@ -55,7 +62,8 @@ public class EndingVoiceCacheService {
 
     @EventListener(ApplicationReadyEvent.class)
     void warmOnApplicationReady() {
-        if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()) {
+        if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()
+                || !aiVoiceProperties.isOpeningVoicePrecacheOnStartup()) {
             return;
         }
         executor.submit(() -> {
@@ -100,10 +108,15 @@ public class EndingVoiceCacheService {
         if (active == null) {
             return;
         }
-        if (!force && isAnyReady()) {
+        if (!force && isFullyReady(active)) {
             return;
         }
-        regenerateAll(active);
+        String voiceId = voiceCatalog.resolveActiveVoiceId();
+        if (!StringUtils.hasText(voiceId)) {
+            return;
+        }
+        log.info("[结束语缓存] 仅预合成当前音色 voice={}", maskVoice(voiceId));
+        regenerateAllForVoice(active, voiceId);
     }
 
     /** 为所有已知音色预生成结束语（默认/超时/轮次） */
@@ -118,9 +131,12 @@ public class EndingVoiceCacheService {
     public void regenerateAllForVoice(AiPrompt prompt, String voiceId) {
         String defaultEnd = resolveDefaultEndText(prompt);
         rebuildTextIndex(defaultEnd);
-        synthesizeIfNeeded(voiceId, KEY_DEFAULT, defaultEnd);
-        synthesizeIfNeeded(voiceId, KEY_DURATION, ForcedHangupRules.DURATION_END_WORDS);
-        synthesizeIfNeeded(voiceId, KEY_LOOP, LOOP_END_WORDS);
+        Map<String, String> keyTexts = endingKeyTexts(defaultEnd);
+        for (String key : ALL_ENDING_KEYS) {
+            if (!synthesizeIfNeeded(voiceId, key, keyTexts.get(key))) {
+                return;
+            }
+        }
     }
 
     public Path copyToCallPlayback(String fsUuid, String endText) {
@@ -147,30 +163,82 @@ public class EndingVoiceCacheService {
     }
 
     public boolean isAnyReady() {
-        return isReadyForVoice(voiceCatalog.resolveActiveVoiceId());
+        AiPrompt active = aiPromptMapper.selectOne(
+                new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
+        return active != null && isFullyReady(active);
     }
 
     public boolean isReadyForVoice(String voiceId) {
-        if (!StringUtils.hasText(voiceId)) {
+        AiPrompt active = aiPromptMapper.selectOne(
+                new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
+        if (active == null || !StringUtils.hasText(voiceId)) {
             return false;
         }
-        return resolveSourceWav(voiceId, KEY_DEFAULT) != null
-                || resolveSourceWav(voiceId, KEY_DURATION) != null;
+        return isFullyReadyForVoice(active, voiceId);
     }
 
     public int countReadyVoices() {
+        AiPrompt active = aiPromptMapper.selectOne(
+                new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
+        if (active == null) {
+            return 0;
+        }
         int n = 0;
         for (String voiceId : voiceCatalog.listAllVoiceIds()) {
-            if (isReadyForVoice(voiceId)) {
+            if (isFullyReadyForVoice(active, voiceId)) {
                 n++;
             }
         }
         return n;
     }
 
-    private void synthesizeIfNeeded(String voiceId, String key, String text) {
+    private boolean isFullyReady(AiPrompt prompt) {
+        String voiceId = voiceCatalog.resolveActiveVoiceId();
+        return StringUtils.hasText(voiceId) && isFullyReadyForVoice(prompt, voiceId);
+    }
+
+    private boolean isFullyReadyForVoice(AiPrompt prompt, String voiceId) {
+        if (!StringUtils.hasText(voiceId)) {
+            return false;
+        }
+        Map<String, String> keyTexts = endingKeyTexts(resolveDefaultEndText(prompt));
+        for (String key : ALL_ENDING_KEYS) {
+            if (!isKeyReady(voiceId, key, keyTexts.get(key))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Map<String, String> endingKeyTexts(String defaultEnd) {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put(KEY_DEFAULT, defaultEnd);
+        m.put(KEY_DURATION, ForcedHangupRules.DURATION_END_WORDS);
+        m.put(KEY_LOOP, LOOP_END_WORDS);
+        m.put(KEY_TTS_FAILURE, ForcedHangupRules.TTS_FAILURE_END_WORDS);
+        return m;
+    }
+
+    private boolean isKeyReady(String voiceId, String key, String text) {
+        if (!StringUtils.hasText(text)) {
+            return true;
+        }
+        try {
+            Path wav = voiceDir(voiceId).resolve("ending_" + key + ".wav");
+            Path meta = voiceDir(voiceId).resolve("ending_" + key + ".meta");
+            if (!Files.exists(wav) || !Files.exists(meta) || Files.size(wav) <= 44) {
+                return false;
+            }
+            return cacheSignature(text, voiceId).equals(Files.readString(meta).trim());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** @return false 表示遇到 428/429，后续预合成应中止 */
+    private boolean synthesizeIfNeeded(String voiceId, String key, String text) {
         if (!StringUtils.hasText(text) || !StringUtils.hasText(voiceId)) {
-            return;
+            return true;
         }
         String hash = cacheSignature(text, voiceId);
         try {
@@ -180,27 +248,69 @@ public class EndingVoiceCacheService {
             Path meta = voiceDir.resolve("ending_" + key + ".meta");
             if (Files.exists(wav) && Files.exists(meta) && hash.equals(Files.readString(meta).trim())) {
                 publishLegacyIfActive(voiceId, key, wav);
-                return;
-            }
-            if (!ttsPhraseCacheService.isAvailable()) {
-                log.warn("[结束语缓存] TTS 不可用 key={} voice={}", key, maskVoice(voiceId));
-                return;
+                return true;
             }
             long t0 = System.currentTimeMillis();
             Path tmp = voiceDir.resolve("ending_building_" + key + ".wav");
-            Path out = ttsPhraseCacheService.synthesizeToFile(tmp, text.trim(), voiceId);
+            Path out = synthesizeEndingAudio(tmp, text.trim(), voiceId, key);
             if (out == null || !Files.exists(out) || Files.size(out) <= 44) {
                 log.warn("[结束语缓存] 合成无有效音频 key={} voice={}", key, maskVoice(voiceId));
-                return;
+                return true;
             }
             Files.move(out, wav, StandardCopyOption.REPLACE_EXISTING);
             Files.writeString(meta, hash, StandardCharsets.UTF_8);
             publishLegacyIfActive(voiceId, key, wav);
             log.info("[结束语缓存] 已预合成 key={} voice={} bytes={} 耗时{}ms",
                     key, maskVoice(voiceId), Files.size(wav), System.currentTimeMillis() - t0);
+            return true;
         } catch (Exception e) {
+            TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+            if (tts != null && tts.isRateLimited()) {
+                log.warn("[结束语缓存] CosyVoice 限流，中止剩余预合成 key={} voice={}", key, maskVoice(voiceId));
+                return false;
+            }
             log.warn("[结束语缓存] 合成异常 key={} voice={}: {}", key, maskVoice(voiceId), e.getMessage());
+            return true;
         }
+    }
+
+    /** CosyVoice 优先；418/异常时回退 Windows SAPI，确保 tts_fail 等挂断语也有本地 wav */
+    private Path synthesizeEndingAudio(Path out, String text, String voiceId, String key) {
+        if (ttsPhraseCacheService.isAvailable()) {
+            try {
+                Path cosy = ttsPhraseCacheService.synthesizeFixedPhraseToFile(out, text, voiceId);
+                if (cosy != null && Files.exists(cosy)) {
+                    try {
+                        if (Files.size(cosy) > 44) {
+                            return cosy;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            } catch (Exception e) {
+                TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+                if (tts != null && tts.isRateLimited()) {
+                    throw tts;
+                }
+                log.warn("[结束语缓存] CosyVoice 失败 key={} voice={}，尝试本地 SAPI: {}",
+                        key, maskVoice(voiceId), e.getMessage());
+            }
+        }
+        try {
+            Path local = localPromptWavService.synthesizeLocalFallbackToFile(out, text);
+            if (local != null && Files.exists(local)) {
+                try {
+                    if (Files.size(local) > 44) {
+                        log.info("[结束语缓存] 已用本地 SAPI 预合成 key={} voice={}", key, maskVoice(voiceId));
+                        return local;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[结束语缓存] 本地 SAPI 失败 key={} voice={}: {}", key, maskVoice(voiceId), e.getMessage());
+        }
+        return null;
     }
 
     private void publishLegacyIfActive(String voiceId, String key, Path localWav) throws Exception {
@@ -229,6 +339,9 @@ public class EndingVoiceCacheService {
         }
         if (norm.contains(normalizeText(LOOP_END_WORDS))) {
             return resolveSourceWav(voiceId, KEY_LOOP);
+        }
+        if (norm.contains(normalizeText(ForcedHangupRules.TTS_FAILURE_END_WORDS))) {
+            return resolveSourceWav(voiceId, KEY_TTS_FAILURE);
         }
         return resolveSourceWav(voiceId, KEY_DEFAULT);
     }
@@ -260,6 +373,7 @@ public class EndingVoiceCacheService {
         putIndex(ForcedHangupRules.END_WORDS, KEY_DEFAULT);
         putIndex(ForcedHangupRules.DURATION_END_WORDS, KEY_DURATION);
         putIndex(LOOP_END_WORDS, KEY_LOOP);
+        putIndex(ForcedHangupRules.TTS_FAILURE_END_WORDS, KEY_TTS_FAILURE);
     }
 
     private void putIndex(String text, String key) {

@@ -45,6 +45,9 @@ public class TtsPhraseCacheService {
     /** 启动后后台预热静默追问/没听清等高频话术，降低首通 TTS 延迟 */
     @EventListener(ContextRefreshedEvent.class)
     public void warmCommonPhrasesOnStartup() {
+        if (!aiVoiceProperties.isTtsPhraseWarmOnStartup()) {
+            return;
+        }
         if (commonPhrasesWarmed || !isAvailable()) {
             return;
         }
@@ -81,6 +84,15 @@ public class TtsPhraseCacheService {
     }
 
     public Path synthesizeToFile(Path out, String text, String voiceId) {
+        return synthesizeInternal(out, text, voiceId, false);
+    }
+
+    /** 开场白/结束语预合成：不带 Instruct，减少 428 */
+    public Path synthesizeFixedPhraseToFile(Path out, String text, String voiceId) {
+        return synthesizeInternal(out, text, voiceId, true);
+    }
+
+    private Path synthesizeInternal(Path out, String text, String voiceId, boolean fixedPhrase) {
         if (!StringUtils.hasText(text) || !isAvailable()) {
             return null;
         }
@@ -97,7 +109,9 @@ public class TtsPhraseCacheService {
                 }
             }
         }
-        Path built = dashScopeVoiceTtsService.synthesizeToFile(out, text, voiceId);
+        Path built = fixedPhrase
+                ? dashScopeVoiceTtsService.synthesizeFixedPhraseToFile(out, text, voiceId)
+                : dashScopeVoiceTtsService.synthesizeToFile(out, text, voiceId);
         if (built == null || !Files.exists(built) || fileSize(built) <= 44) {
             return built;
         }

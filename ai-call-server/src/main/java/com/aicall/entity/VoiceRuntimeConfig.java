@@ -16,6 +16,10 @@ public class VoiceRuntimeConfig {
     private String silenceProfile;
     /** 分段模式 CosyVoice 复刻 voice_id */
     private String cosyvoiceCloneVoiceId;
+    /** clone=复刻音色 | system=系统预置音色 */
+    private String ttsVoiceMode;
+    /** 系统预置音色 voice 参数（如 longanyang） */
+    private String cosyvoiceSystemVoice;
     /** 1=接通后播报开场白（后台控制） */
     private Integer playOpeningOnAnswer;
     private LocalDateTime updateTime;

@@ -1,27 +1,29 @@
 package com.aicall.config;
 
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /**
  * 外呼语音运行时配置表（句末档位、CosyVoice 音色、接通播报等）。
+ * 使用 @PostConstruct 在启动早期完成 DDL，避免 MyBatis 查询缺列。
  */
 @Slf4j
 @Component
+@Order(0)
 @RequiredArgsConstructor
-public class VoiceRuntimeConfigSchemaInitializer implements ApplicationRunner {
+public class VoiceRuntimeConfigSchemaInitializer {
 
     private static final String TURN_BASED = "turn-based";
 
     private final JdbcTemplate jdbcTemplate;
     private final AiVoiceProperties aiVoiceProperties;
 
-    @Override
-    public void run(ApplicationArguments args) {
+    @PostConstruct
+    public void upgrade() {
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `voice_runtime_config` (
                   `id` int NOT NULL COMMENT '固定为1',
@@ -37,15 +39,23 @@ public class VoiceRuntimeConfigSchemaInitializer implements ApplicationRunner {
 
         addColumnIfMissing("play_opening_on_answer",
                 "ALTER TABLE voice_runtime_config ADD COLUMN play_opening_on_answer tinyint NOT NULL DEFAULT 1 "
-                        + "COMMENT '接通后播报开场白' AFTER omni_realtime_voice");
+                        + "COMMENT '接通后播报开场白'");
 
         addColumnIfMissing("cosyvoice_clone_voice_id",
                 "ALTER TABLE voice_runtime_config ADD COLUMN cosyvoice_clone_voice_id varchar(128) DEFAULT NULL "
-                        + "COMMENT 'CosyVoice复刻voice_id' AFTER omni_realtime_voice");
+                        + "COMMENT 'CosyVoice复刻voice_id'");
+
+        addColumnIfMissing("tts_voice_mode",
+                "ALTER TABLE voice_runtime_config ADD COLUMN tts_voice_mode varchar(16) NOT NULL DEFAULT 'clone' "
+                        + "COMMENT 'clone|system 音色来源'");
+
+        addColumnIfMissing("cosyvoice_system_voice",
+                "ALTER TABLE voice_runtime_config ADD COLUMN cosyvoice_system_voice varchar(64) DEFAULT 'longanyang' "
+                        + "COMMENT '系统预置音色 voice 参数'");
 
         addColumnIfMissing("silence_profile",
                 "ALTER TABLE voice_runtime_config ADD COLUMN silence_profile varchar(16) NOT NULL DEFAULT 'stable' "
-                        + "COMMENT 'stable|fast 句末档位' AFTER dialog_pipeline_mode");
+                        + "COMMENT 'stable|fast 句末档位'");
 
         seedCosyvoiceFromYmlIfEmpty();
         ensurePlayOpeningOnAnswerEnabled();
@@ -158,7 +168,7 @@ public class VoiceRuntimeConfigSchemaInitializer implements ApplicationRunner {
             jdbcTemplate.execute(ddl);
             log.info("voice_runtime_config 已添加列 {}", column);
         } catch (Exception e) {
-            log.warn("voice_runtime_config 列 {} 升级跳过: {}", column, e.getMessage());
+            log.error("voice_runtime_config 列 {} 升级失败: {}", column, e.getMessage());
         }
     }
 }

@@ -23,7 +23,7 @@ public final class LlmStreamingSentenceBuffer {
 
     public LlmStreamingSentenceBuffer(int maxChars, int firstChunkMinChars) {
         this.maxChars = Math.max(16, maxChars);
-        this.firstChunkMinChars = Math.max(8, Math.min(this.maxChars, firstChunkMinChars));
+        this.firstChunkMinChars = Math.max(6, Math.min(this.maxChars, firstChunkMinChars));
     }
 
     public List<String> feed(String delta) {

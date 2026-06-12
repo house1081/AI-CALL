@@ -51,6 +51,8 @@ public class AiVoiceProperties {
     private double ttsPitchRate = 1.02;
     private int ttsVolume = 80;
     /** CosyVoice 风格提示（空则不下发） */
+    /** CosyVoice Instruct 情感指令（关闭可减轻 428；固定话术预合成始终不带 instruction） */
+    private boolean ttsInstructionEnabled = false;
     private String ttsInstruction = "用自然亲切的客服语气，语速适中，像真人打电话。";
     /** 电话播报 wav 峰值归一化比例（0.5~1.0，越大越响） */
     private double playbackPeakRatio = 0.95;
@@ -167,6 +169,8 @@ public class AiVoiceProperties {
     private int dialogSilenceProbeMax = 3;
     /** 话术保存时预合成开场白 wav，接通后拷贝即播 */
     private boolean openingVoicePrecacheEnabled = true;
+    /** 服务启动时是否自动预合成（建议关，避免启动即触发 428） */
+    private boolean openingVoicePrecacheOnStartup = false;
     /** 预合成开场白本地目录 */
     private String openingVoiceCacheDir = "./uploads/tts/opening";
     /** 预合成结束语本地目录 */
@@ -174,13 +178,15 @@ public class AiVoiceProperties {
     /** 对话话术 TTS 短语缓存目录 */
     private String ttsPhraseCacheDir = "./uploads/tts/phrases";
     /** CosyVoice 两次请求最小间隔（毫秒），缓解 428 */
-    private int ttsMinIntervalMs = 350;
-    /** 触发 428 后全局冷却（毫秒），期间其它线程也等待 */
-    private int ttsRateLimitCooldownMs = 12000;
-    /** 遇到 428 时最多重试次数 */
-    private int ttsRateLimitRetries = 3;
+    private int ttsMinIntervalMs = 1200;
+    /** 触发 428 后全局冷却（毫秒）；0=关闭 */
+    private int ttsRateLimitCooldownMs = 3000;
+    /** 遇到 428 时最多重试次数（仅网络异常；限流不重试） */
+    private int ttsRateLimitRetries = 0;
     /** 启动后延迟预合成开场白（毫秒），避免与首通外呼抢 TTS */
-    private int openingVoicePrecacheDelayMs = 3000;
+    private int openingVoicePrecacheDelayMs = 8000;
+    /** 启动时是否预热常用短语 TTS（易与开场/结束语缓存叠加触发 428） */
+    private boolean ttsPhraseWarmOnStartup = false;
     /** 流式 TTS：按句切分边合成边播 */
     private boolean ttsStreamEnabled = false;
     /** 流式 ASR：固定短段（不推荐；请用 asr-vad-enabled） */

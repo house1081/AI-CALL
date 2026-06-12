@@ -1,6 +1,7 @@
 package com.aicall.service;
 
 import com.aicall.common.BizException;
+import com.aicall.common.CosyVoiceModelRules;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.dto.CosyVoiceVoiceEnrollRequest;
 import com.aicall.dto.CosyVoiceVoiceItemDto;
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -37,6 +39,8 @@ public class CosyVoiceVoiceEnrollmentService {
     private final AiVoiceProperties aiVoiceProperties;
     private final DashScopeApiKeyResolver dashScopeApiKeyResolver;
     private final ObjectMapper objectMapper;
+    @Lazy
+    private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
@@ -57,20 +61,72 @@ public class CosyVoiceVoiceEnrollmentService {
                 break;
             }
             for (JsonNode item : list) {
-                CosyVoiceVoiceItemDto dto = new CosyVoiceVoiceItemDto();
-                String voiceId = item.path("voice_id").asText("");
-                dto.setVoiceId(voiceId);
-                dto.setStatus(item.path("status").asText(""));
-                dto.setGmtCreate(item.path("gmt_create").asText(""));
-                dto.setCompatible(isCompatibleVoice(voiceId, targetModel));
-                all.add(dto);
+                all.add(toVoiceItem(item, targetModel));
             }
             if (list.size() < pageSize) {
                 break;
             }
         }
+        // list_voice 对部分账号/旧音色可能返回空；补查当前配置的 voice_id
+        mergeConfiguredVoiceIfMissing(all, apiKey, targetModel);
         log.info("[CosyVoice复刻] 查询音色 {} 条，当前模型 target={}", all.size(), targetModel);
         return all;
+    }
+
+    /** 按 voice_id 查询状态（list_voice 为空时的兜底） */
+    public CosyVoiceVoiceItemDto queryVoice(String voiceId) {
+        if (!StringUtils.hasText(voiceId)) {
+            return null;
+        }
+        String apiKey = requireApiKey();
+        String targetModel = resolveTargetModel();
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("action", "query_voice");
+        input.put("voice_id", voiceId.trim());
+        try {
+            JsonNode output = invoke(apiKey, input);
+            JsonNode detail = output.path("voice_id").asText("").isEmpty()
+                    ? output : output;
+            if (detail.isObject() && StringUtils.hasText(detail.path("voice_id").asText(""))) {
+                return toVoiceItem(detail, targetModel);
+            }
+            CosyVoiceVoiceItemDto dto = new CosyVoiceVoiceItemDto();
+            dto.setVoiceId(voiceId.trim());
+            dto.setStatus("UNKNOWN");
+            dto.setCompatible(isCompatibleVoice(voiceId, targetModel));
+            return dto;
+        } catch (Exception e) {
+            log.warn("[CosyVoice复刻] query_voice 失败 voiceId={}: {}", voiceId, e.getMessage());
+            return null;
+        }
+    }
+
+    private void mergeConfiguredVoiceIfMissing(List<CosyVoiceVoiceItemDto> all, String apiKey,
+                                               String targetModel) {
+        String configured = voiceRuntimeSettingsService.getCosyvoiceCloneVoiceId();
+        if (!StringUtils.hasText(configured)) {
+            return;
+        }
+        boolean exists = all.stream().anyMatch(v -> configured.equals(v.getVoiceId()));
+        if (exists) {
+            return;
+        }
+        CosyVoiceVoiceItemDto queried = queryVoice(configured);
+        if (queried != null) {
+            all.add(0, queried);
+            log.info("[CosyVoice复刻] list_voice 未返回，已通过 query_voice 补全 voiceId={} status={}",
+                    configured, queried.getStatus());
+        }
+    }
+
+    private CosyVoiceVoiceItemDto toVoiceItem(JsonNode item, String targetModel) {
+        CosyVoiceVoiceItemDto dto = new CosyVoiceVoiceItemDto();
+        String voiceId = item.path("voice_id").asText("");
+        dto.setVoiceId(voiceId);
+        dto.setStatus(item.path("status").asText(""));
+        dto.setGmtCreate(item.path("gmt_create").asText(""));
+        dto.setCompatible(isCompatibleVoice(voiceId, targetModel));
+        return dto;
     }
 
     public CosyVoiceVoiceItemDto enroll(CosyVoiceVoiceEnrollRequest req) {
@@ -121,13 +177,17 @@ public class CosyVoiceVoiceEnrollmentService {
     }
 
     public String resolveTargetModel() {
-        String model = aiVoiceProperties.getTtsModel();
-        return StringUtils.hasText(model) ? model.trim() : "cosyvoice-v3.5-plus";
+        return CosyVoiceModelRules.resolveCloneEnrollmentTargetModel(aiVoiceProperties.getTtsModel());
     }
 
     public boolean isCompatibleVoice(String voiceId, String targetModel) {
         if (!StringUtils.hasText(voiceId)) {
             return false;
+        }
+        String inferred = CosyVoiceModelRules.inferEnrollmentTargetModel(voiceId);
+        if (StringUtils.hasText(inferred)) {
+            String target = (targetModel != null ? targetModel : resolveTargetModel()).trim().toLowerCase();
+            return inferred.equalsIgnoreCase(target);
         }
         String v = voiceId.trim().toLowerCase();
         String target = (targetModel != null ? targetModel : resolveTargetModel()).trim().toLowerCase();

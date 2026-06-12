@@ -1,8 +1,12 @@
 package com.aicall.service;
 
 import com.aicall.common.BizException;
+import com.aicall.common.CosyVoiceModelRules;
+import com.aicall.common.CosyVoiceSystemVoiceCatalog;
+import com.aicall.common.CosyVoiceVoiceMode;
 import com.aicall.common.SilenceProfile;
 import com.aicall.config.AiVoiceProperties;
+import com.aicall.dto.CosyVoiceSystemVoiceOptionDto;
 import com.aicall.dto.VoiceRuntimeConfigDto;
 import com.aicall.entity.VoiceRuntimeConfig;
 import com.aicall.entity.CallTask;
@@ -15,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -100,6 +105,56 @@ public class VoiceRuntimeSettingsService {
                 : "";
     }
 
+    public String getTtsVoiceMode() {
+        VoiceRuntimeConfig row = loadRow();
+        if (row != null && StringUtils.hasText(row.getTtsVoiceMode())) {
+            return CosyVoiceVoiceMode.normalize(row.getTtsVoiceMode());
+        }
+        return CosyVoiceVoiceMode.CLONE;
+    }
+
+    public boolean isSystemVoiceMode() {
+        return CosyVoiceVoiceMode.isSystem(getTtsVoiceMode());
+    }
+
+    public String getCosyvoiceSystemVoice() {
+        VoiceRuntimeConfig row = loadRow();
+        if (row != null && StringUtils.hasText(row.getCosyvoiceSystemVoice())) {
+            return CosyVoiceSystemVoiceCatalog.normalizeVoiceId(row.getCosyvoiceSystemVoice());
+        }
+        if (StringUtils.hasText(aiVoiceProperties.getTtsVoice())) {
+            return CosyVoiceSystemVoiceCatalog.normalizeVoiceId(aiVoiceProperties.getTtsVoice());
+        }
+        return CosyVoiceSystemVoiceCatalog.defaultVoiceId();
+    }
+
+    /** 外呼 TTS 实际使用的 voice 参数 */
+    public String getEffectiveTtsVoice() {
+        if (isSystemVoiceMode()) {
+            return getCosyvoiceSystemVoice();
+        }
+        return getCosyvoiceCloneVoiceId();
+    }
+
+    /** 外呼 TTS 实际使用的 CosyVoice 模型 */
+    public String getEffectiveTtsModel() {
+        if (isSystemVoiceMode()) {
+            return CosyVoiceSystemVoiceCatalog.resolveModel(getCosyvoiceSystemVoice());
+        }
+        return CosyVoiceModelRules.resolveCloneTtsModel(
+                getCosyvoiceCloneVoiceId(), aiVoiceProperties.getTtsModel());
+    }
+
+    public List<CosyVoiceSystemVoiceOptionDto> listSystemVoiceOptions() {
+        return CosyVoiceSystemVoiceCatalog.listOptions().stream().map(o -> {
+            CosyVoiceSystemVoiceOptionDto dto = new CosyVoiceSystemVoiceOptionDto();
+            dto.setVoiceId(o.voiceId());
+            dto.setLabel(o.label());
+            dto.setModel(o.model());
+            return dto;
+        }).toList();
+    }
+
     public boolean isPlayOpeningOnAnswer() {
         VoiceRuntimeConfig row = loadRow();
         if (row != null && row.getPlayOpeningOnAnswer() != null) {
@@ -115,9 +170,9 @@ public class VoiceRuntimeSettingsService {
     public void logEffectiveVoiceProfile(String context, Integer taskId) {
         String ctx = StringUtils.hasText(context) ? context : "外呼";
         SilenceProfile.Params sp = resolveSilenceParams(taskId);
-        log.info("[语音配置] {} 生效 taskId={} cosyVoice={} silenceProfile={} silenceMs={} playOpening={}",
-                ctx, taskId, maskVoiceId(getCosyvoiceCloneVoiceId()), sp.profile(), sp.userSilenceMs(),
-                isPlayOpeningOnAnswer());
+        log.info("[语音配置] {} 生效 taskId={} voiceMode={} cosyVoice={} ttsModel={} silenceProfile={} silenceMs={} playOpening={}",
+                ctx, taskId, getTtsVoiceMode(), maskVoiceId(getEffectiveTtsVoice()), getEffectiveTtsModel(),
+                sp.profile(), sp.userSilenceMs(), isPlayOpeningOnAnswer());
     }
 
     public VoiceRuntimeConfigDto getForAdmin() {
@@ -127,13 +182,18 @@ public class VoiceRuntimeSettingsService {
         dto.setEffectiveUserSilenceMs(sp.userSilenceMs());
         dto.setEffectiveVadThreshold(sp.vadThreshold());
         dto.setCosyvoiceCloneVoiceId(getCosyvoiceCloneVoiceId());
+        dto.setTtsVoiceMode(getTtsVoiceMode());
+        dto.setCosyvoiceSystemVoice(getCosyvoiceSystemVoice());
+        dto.setEffectiveTtsVoice(getEffectiveTtsVoice());
+        dto.setEffectiveTtsModel(getEffectiveTtsModel());
+        dto.setSystemVoiceOptions(listSystemVoiceOptions());
         dto.setDefaultCosyvoiceCloneVoiceId(
                 StringUtils.hasText(aiVoiceProperties.getTtsCloneVoiceId())
                         ? aiVoiceProperties.getTtsCloneVoiceId().trim()
                         : "");
         dto.setPlayOpeningOnAnswer(isPlayOpeningOnAnswer());
         dto.setDashScopeConfigured(isDashScopeConfigured());
-        dto.setCosyvoiceTtsModel(aiVoiceProperties.getTtsModel());
+        dto.setCosyvoiceTtsModel(getEffectiveTtsModel());
         dto.setUserSilenceBeforeResponseMs(aiVoiceProperties.getUserSilenceBeforeResponseMs());
         dto.setTurnBasedPlaybackAsrTailMs(aiVoiceProperties.getTurnBasedPlaybackAsrTailMs());
         dto.setPlaybackBargeInEnergyThreshold(aiVoiceProperties.getPlaybackBargeInEnergyThreshold());
@@ -141,6 +201,12 @@ public class VoiceRuntimeSettingsService {
     }
 
     public void validateVoiceReady(Integer taskId) {
+        if (isSystemVoiceMode()) {
+            if (!StringUtils.hasText(getCosyvoiceSystemVoice())) {
+                throw new BizException("请先在总后台选择 CosyVoice 系统音色");
+            }
+            return;
+        }
         if (!StringUtils.hasText(getCosyvoiceCloneVoiceId())) {
             throw new BizException("请先在总后台配置 CosyVoice 复刻 voice_id");
         }
@@ -154,10 +220,19 @@ public class VoiceRuntimeSettingsService {
                 StringUtils.hasText(req.getSilenceProfile())
                         ? req.getSilenceProfile().trim()
                         : resolveSilenceProfile(null));
+        String voiceMode = CosyVoiceVoiceMode.normalize(req.getTtsVoiceMode());
         String cosyVoice = StringUtils.hasText(req.getCosyvoiceCloneVoiceId())
                 ? req.getCosyvoiceCloneVoiceId().trim()
                 : getCosyvoiceCloneVoiceId();
-        if (!StringUtils.hasText(cosyVoice)) {
+        String systemVoice = CosyVoiceSystemVoiceCatalog.normalizeVoiceId(
+                StringUtils.hasText(req.getCosyvoiceSystemVoice())
+                        ? req.getCosyvoiceSystemVoice().trim()
+                        : getCosyvoiceSystemVoice());
+        if (CosyVoiceVoiceMode.isSystem(voiceMode)) {
+            if (!StringUtils.hasText(systemVoice)) {
+                throw new BizException("请选择系统预置音色");
+            }
+        } else if (!StringUtils.hasText(cosyVoice)) {
             throw new BizException("需配置 CosyVoice 复刻 voice_id");
         }
         boolean playOpening = req.getPlayOpeningOnAnswer() != null
@@ -166,31 +241,35 @@ public class VoiceRuntimeSettingsService {
         int playOpeningFlag = playOpening ? 1 : 0;
 
         VoiceRuntimeConfig row = loadRow();
-        String oldCosy = row != null && StringUtils.hasText(row.getCosyvoiceCloneVoiceId())
-                ? row.getCosyvoiceCloneVoiceId().trim() : "";
+        String oldEffectiveVoice = getEffectiveTtsVoice();
+        String oldEffectiveModel = getEffectiveTtsModel();
 
         if (row == null) {
             row = new VoiceRuntimeConfig();
             row.setId(CONFIG_ID);
             row.setSilenceProfile(silenceProfile);
             row.setCosyvoiceCloneVoiceId(cosyVoice);
+            row.setTtsVoiceMode(voiceMode);
+            row.setCosyvoiceSystemVoice(systemVoice);
             row.setPlayOpeningOnAnswer(playOpeningFlag);
             row.setUpdateTime(LocalDateTime.now());
             voiceRuntimeConfigMapper.insert(row);
         } else {
             row.setSilenceProfile(silenceProfile);
             row.setCosyvoiceCloneVoiceId(cosyVoice);
+            row.setTtsVoiceMode(voiceMode);
+            row.setCosyvoiceSystemVoice(systemVoice);
             row.setPlayOpeningOnAnswer(playOpeningFlag);
             row.setUpdateTime(LocalDateTime.now());
             voiceRuntimeConfigMapper.updateById(row);
         }
-        log.info("[语音配置] 已保存（下一通外呼生效，无需重启）silenceProfile={} cosyVoice={} playOpening={}",
-                silenceProfile, maskVoiceId(cosyVoice), playOpeningFlag);
+        log.info("[语音配置] 已保存（下一通外呼生效，无需重启）silenceProfile={} voiceMode={} cloneVoice={} systemVoice={} playOpening={}",
+                silenceProfile, voiceMode, maskVoiceId(cosyVoice), systemVoice, playOpeningFlag);
 
-        if (!cosyVoice.equals(oldCosy)) {
-            openingVoiceCacheProvider.ifAvailable(s -> s.regenerateAsync(null));
-            endingVoiceCacheProvider.ifAvailable(s -> s.regenerateAsync(null));
-            log.info("[语音配置] CosyVoice 音色已变更，已触发开场白/结束语预合成刷新");
+        String newEffectiveVoice = getEffectiveTtsVoice();
+        String newEffectiveModel = getEffectiveTtsModel();
+        if (!newEffectiveVoice.equals(oldEffectiveVoice) || !newEffectiveModel.equals(oldEffectiveModel)) {
+            log.info("[语音配置] CosyVoice 音色已变更，请在「固定话术预生成」手动同步（避免自动预合成触发 428）");
         }
     }
 

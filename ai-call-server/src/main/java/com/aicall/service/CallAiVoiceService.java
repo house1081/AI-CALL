@@ -1,5 +1,6 @@
 package com.aicall.service;
 
+import com.aicall.common.TtsSynthesisException;
 import com.aicall.common.DialogSlotHelper;
 import com.aicall.common.ForcedHangupRules;
 import com.aicall.config.AiVoiceProperties;
@@ -16,8 +17,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -77,6 +80,8 @@ public class CallAiVoiceService {
                 return dialogLlmExecutorService.run(() -> voiceTurnInternal(req));
             }
             return voiceTurnInternal(req);
+        } catch (TtsSynthesisException e) {
+            throw e;
         } catch (TimeoutException e) {
             log.warn("[LLM] 大模型超时 uuid={} 播放兜底话术", req.getFsUuid());
             return voiceTurnWithLiveFallback(req);
@@ -101,6 +106,8 @@ public class CallAiVoiceService {
                 playText(req.getFsUuid(), reply);
             }
             return fallback;
+        } catch (TtsSynthesisException e) {
+            throw e;
         } catch (Exception ex) {
             log.warn("[LLM] 槽位兜底也失败 uuid={}: {}", req.getFsUuid(), ex.getMessage());
             AiChatResponse r = new AiChatResponse();
@@ -226,23 +233,66 @@ public class CallAiVoiceService {
     private void playStreamTtsTail(String fsUuid, String fullReply, String streamedPrefix,
                                    CompletableFuture<Void> firstPlayFuture) throws Exception {
         if (firstPlayFuture != null) {
-            firstPlayFuture.join();
+            try {
+                firstPlayFuture.join();
+            } catch (CompletionException e) {
+                TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+                if (tts != null) {
+                    throw tts;
+                }
+                throw e;
+            }
         }
         String prefix = streamedPrefix != null ? streamedPrefix.trim() : "";
+        String remainder = StreamTtsRemainder.unplayed(fullReply, prefix);
+        CompletableFuture<Path> remainderWavFuture = null;
+        if (StringUtils.hasText(remainder) && shouldPlayOnChannel(fsUuid)) {
+            String rem = remainder;
+            remainderWavFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return voicePlaybackService.synthesizeToFile(fsUuid, rem);
+                } catch (Exception e) {
+                    if (e instanceof TtsSynthesisException tts) {
+                        throw new CompletionException(tts);
+                    }
+                    throw new CompletionException(e);
+                }
+            }, STREAM_TTS_EXECUTOR);
+        }
         if (StringUtils.hasText(prefix)) {
             log.info("[对话TTS] 等待流式首句播完 uuid={} len={}", fsUuid, prefix.length());
             voicePlaybackService.waitPlaybackFinished(fsUuid, prefix, null);
         }
-        String remainder = StreamTtsRemainder.unplayed(fullReply, prefix);
         if (!StringUtils.hasText(remainder)) {
+            if (remainderWavFuture != null) {
+                remainderWavFuture.cancel(true);
+            }
             log.info("[对话TTS] 流式首句已覆盖全文 uuid={}", fsUuid);
             return;
         }
         log.info("[对话TTS] 流式补播 uuid={} 剩余len={}", fsUuid, remainder.length());
         if (!shouldPlayOnChannel(fsUuid)) {
+            if (remainderWavFuture != null) {
+                remainderWavFuture.cancel(true);
+            }
             return;
         }
-        voicePlaybackService.playTextSequential(fsUuid, remainder);
+        boolean played = false;
+        if (remainderWavFuture != null) {
+            try {
+                Path wav = remainderWavFuture.join();
+                played = voicePlaybackService.playSynthesizedWav(fsUuid, wav);
+            } catch (CompletionException e) {
+                TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+                if (tts != null) {
+                    throw tts;
+                }
+                log.warn("[对话TTS] 并行预合成失败，回退实时合成 uuid={}: {}", fsUuid, e.getMessage());
+            }
+        }
+        if (!played) {
+            playText(fsUuid, remainder);
+        }
         voicePlaybackService.waitPlaybackFinished(fsUuid, remainder, null);
     }
 
@@ -297,9 +347,9 @@ public class CallAiVoiceService {
         if (!ok) {
             if (!eslService.uuidExists(fsUuid)) {
                 log.warn("播报失败：通话通道已结束（客户挂机或 FS 超时）uuid={}", fsUuid);
-            } else {
-                log.error("所有播报方式均失败 uuid={}，请检查 playback-base-url 是否 FS 可访问、TTS 是否配置", fsUuid);
+                return;
             }
+            throw new TtsSynthesisException("所有播报方式均失败", false);
         }
     }
 }
