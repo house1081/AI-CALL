@@ -1,0 +1,29 @@
+<!--
+  FreeSWITCH 真实外呼 dialplan 示例（需配合 mod_curl 或 lua）
+  将 Java 回调地址改为 application.yml 中 freeswitch.callback-base-url
+  通道变量（originate 已下发）：ai_tenant_id, ai_line_id, ai_task_id, ai_customer_id, ai_callback_base
+-->
+<include>
+  <extension name="ai_outbound_answer">
+    <condition field="destination_number" expression="^ai_outbound$"/>
+    <condition field="${channel_state}" expression="^CS_EXECUTE$"/>
+    <!-- 接通：通知 Java 创建会话 -->
+    <action application="set" data="api_url=${ai_callback_base}/api/callback/fs/call-start"/>
+    <action application="curl" data="${api_url} post '{"tenantId":${ai_tenant_id},"lineId":${ai_line_id},"taskId":${ai_task_id},"customerId":${ai_customer_id},"customerPhone":"${destination_number}","fsUuid":"${uuid}"}'"/>
+    <action application="park"/>
+  </extension>
+
+  <extension name="ai_outbound_hangup">
+    <condition field="destination_number" expression="^ai_outbound$"/>
+    <!-- 挂断：结算；callRecordId 由 call-start 返回写入通道变量 -->
+    <action application="set" data="hangup_url=${ai_callback_base}/api/callback/fs/call-end"/>
+    <action application="curl" data="${hangup_url} post '{"callRecordId":${ai_call_record_id},"callStatus":1,"callDuration":${billsec}}'"/>
+  </extension>
+</include>
+
+<!-- 说明：
+1. 生产建议在 FS 侧用 lua/http.lua 或 mod_xml_curl 更稳定地 POST JSON
+2. originate 命令：sofia/gateway/default/手机号 &park()
+3. 也可在 FS 服务器用 scripts/fs-call-start.sh 轮询通道事件后 curl Java
+4. ESL 端口默认 8021；若你环境为 8080，请改 application.yml 的 freeswitch.esl-port
+-->

@@ -1,0 +1,9 @@
+<!-- PRD 网关层 90 秒兜底示例：放入 conf/dialplan/default.xml 并按环境改 gateway -->
+<extension name="ai_outbound_call">
+  <condition field="destination_number" expression="^(.*)$">
+    <action application="set" data="max_call_seconds=90"/>
+    <action application="set" data="hangup_after_bridge=true"/>
+    <action application="bridge" data="sofia/gateway/default/$1"/>
+    <!-- 语音控制脚本回调 Java: POST /api/callback/fs/call-start|hangup|call-end -->
+  </condition>
+</extension>

@@ -1,0 +1,2 @@
+-- 若线路 SIP 密码曾被错误 MD5 加密，请在管理后台「线路管理」中重新编辑并保存真实网关注册密码（明文）。
+-- 外呼使用：gateway 名 = sip_account，密码 = sip_password，地址 = sip_address
