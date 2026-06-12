@@ -1,6 +1,7 @@
 package com.aicall.service;
 
 import com.aicall.config.AiVoiceProperties;
+import com.aicall.util.AsrHintEchoFilter;
 import com.aicall.util.TelephonyAsrAudioUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,17 +38,20 @@ public class AsrRecognitionService {
     private final AiVoiceProperties aiVoiceProperties;
     private final DashScopeApiKeyResolver dashScopeApiKeyResolver;
     private final TelephonyAsrAudioUtil telephonyAsrAudioUtil;
+    private final ParaformerRealtimeAsrService paraformerRealtimeAsrService;
     private final RestTemplate llmRestTemplate;
     private final ObjectMapper objectMapper;
 
     public AsrRecognitionService(AiVoiceProperties aiVoiceProperties,
                                  DashScopeApiKeyResolver dashScopeApiKeyResolver,
                                  TelephonyAsrAudioUtil telephonyAsrAudioUtil,
+                                 ParaformerRealtimeAsrService paraformerRealtimeAsrService,
                                  @Qualifier("llmRestTemplate") RestTemplate llmRestTemplate,
                                  ObjectMapper objectMapper) {
         this.aiVoiceProperties = aiVoiceProperties;
         this.dashScopeApiKeyResolver = dashScopeApiKeyResolver;
         this.telephonyAsrAudioUtil = telephonyAsrAudioUtil;
+        this.paraformerRealtimeAsrService = paraformerRealtimeAsrService;
         this.llmRestTemplate = llmRestTemplate;
         this.objectMapper = objectMapper;
     }
@@ -62,18 +66,18 @@ public class AsrRecognitionService {
             if (size <= 44) {
                 return "";
             }
+            String text = "";
             if (StringUtils.hasText(aiVoiceProperties.getAsrHttpUrl())) {
-                String text = recognizeViaHttp(prepared);
-                if (StringUtils.hasText(text)) {
-                    return text;
+                text = finalizeAsrText(recognizeViaHttp(prepared));
+            }
+            if (!StringUtils.hasText(text)) {
+                String apiKey = dashScopeApiKeyResolver.resolve();
+                if (StringUtils.hasText(apiKey)) {
+                    text = finalizeAsrText(recognizeViaDashScopeTelephony(prepared, apiKey));
                 }
             }
-            String apiKey = dashScopeApiKeyResolver.resolve();
-            if (StringUtils.hasText(apiKey)) {
-                String text = recognizeViaDashScopeTelephony(prepared, apiKey);
-                if (StringUtils.hasText(text)) {
-                    return text;
-                }
+            if (StringUtils.hasText(text)) {
+                return text;
             }
             log.warn("ASR 结果为空 file={} bytes={}（请检查录音是否含人声、dashscope.api-key）",
                     prepared.getFileName(), size);
@@ -151,16 +155,36 @@ public class AsrRecognitionService {
     private String recognizeViaDashScopeTelephony(Path wavFile, String apiKey) throws Exception {
         String model = resolveDashScopeModel();
         if (!useQwenMultimodalAsr(model)) {
+            if (aiVoiceProperties.isAsrParaformerRealtimeEnabled()) {
+                String realtimeModel = resolveRealtimeParaformerModel(model);
+                String viaWs = paraformerRealtimeAsrService.recognize(
+                        wavFile, apiKey, realtimeModel, aiVoiceProperties.getAsrRealtimeTimeoutSec());
+                if (StringUtils.hasText(viaWs)) {
+                    return viaWs;
+                }
+            }
             String viaFile = tryParaformerFileTranscription(wavFile, apiKey, model);
             if (StringUtils.hasText(viaFile)) {
                 return viaFile;
             }
-            // paraformer 文件转写需公网 file_urls；本机 127.0.0.1 开发环境改走 base64 实时模型
-            String inlineModel = resolveInlineBase64AsrModel(model);
-            log.info("[ASR] paraformer 文件转写不可用，回退 {} base64 直传", inlineModel);
-            return recognizeViaQwenAsrFlash(wavFile, apiKey, inlineModel);
+            log.warn("[ASR] Paraformer 识别无结果 model={}", model);
+            return "";
         }
         return recognizeViaQwenAsrFlash(wavFile, apiKey, model);
+    }
+
+    private String resolveRealtimeParaformerModel(String configured) {
+        if (!StringUtils.hasText(configured)) {
+            return "paraformer-realtime-8k-v2";
+        }
+        String m = configured.trim().toLowerCase();
+        if (m.contains("realtime")) {
+            return configured.trim();
+        }
+        if (m.contains("8k")) {
+            return "paraformer-realtime-8k-v2";
+        }
+        return "paraformer-realtime-v2";
     }
 
     /** 支持 data:audio/wav;base64 直传的 DashScope 模型（电话 8k 场景） */
@@ -274,11 +298,14 @@ public class AsrRecognitionService {
         String asrModel = resolveInlineBase64AsrModel(model);
         String asrContext = StringUtils.hasText(aiVoiceProperties.getAsrContextHint())
                 ? aiVoiceProperties.getAsrContextHint().trim() : "";
+        List<Map<String, Object>> messages = new java.util.ArrayList<>(2);
+        if (StringUtils.hasText(asrContext)) {
+            messages.add(Map.of("role", "system", "content", List.of(Map.of("text", asrContext))));
+        }
+        messages.add(Map.of("role", "user", "content", List.of(Map.of("audio", audioDataUrl))));
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", asrModel);
-        body.put("input", Map.of("messages", List.of(
-                Map.of("role", "system", "content", List.of(Map.of("text", asrContext))),
-                Map.of("role", "user", "content", List.of(Map.of("audio", audioDataUrl))))));
+        body.put("input", Map.of("messages", messages));
         body.put("parameters", Map.of("asr_options", asrOptions));
 
         ResponseEntity<String> resp = llmRestTemplate.exchange(
@@ -369,5 +396,19 @@ public class AsrRecognitionService {
             }
         }
         return cur != null && cur.isTextual() ? cur.asText() : "";
+    }
+
+    private String finalizeAsrText(String text) {
+        if (!StringUtils.hasText(text)) {
+            return "";
+        }
+        String trimmed = text.trim();
+        String hint = aiVoiceProperties.getAsrContextHint();
+        if (AsrHintEchoFilter.isEcho(trimmed, hint)) {
+            String preview = trimmed.length() > 60 ? trimmed.substring(0, 60) + "…" : trimmed;
+            log.warn("[ASR] 丢弃 context-hint 回声 text={}", preview);
+            return "";
+        }
+        return trimmed;
     }
 }

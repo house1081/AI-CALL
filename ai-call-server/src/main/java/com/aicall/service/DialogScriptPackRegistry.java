@@ -100,6 +100,15 @@ public class DialogScriptPackRegistry {
         return pack(kbId).mainFlowScripts().size();
     }
 
+    /** 主线话术去重列表，供 TTS 预热缓存 */
+    public List<String> distinctMainFlowScripts(int kbId) {
+        return pack(kbId).mainFlowScripts().values().stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .toList();
+    }
+
     public int fallbackRuleSize(int kbId) {
         return pack(kbId).keywordRules().size();
     }

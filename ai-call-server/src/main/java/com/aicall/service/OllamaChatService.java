@@ -192,6 +192,17 @@ public class OllamaChatService {
             return buildQuickReply(req, trimReply(intentQuick), modelCfg, start, true);
         }
 
+        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
+                && DialogSlotHelper.shouldPreferMainFlowAdvance(req.getUserText())) {
+            String mainLine = dialogMainFlowService.nextMainLineAfterUser(req.getCallRecordId(), req.getUserText());
+            if (StringUtils.hasText(mainLine)) {
+                log.info("[主线] 快答 recordId={} kb={} step={} user={}",
+                        req.getCallRecordId(), kbId, dialogMainFlowService.currentStep(req.getCallRecordId()),
+                        req.getUserText().length() > 16 ? req.getUserText().substring(0, 16) + "…" : req.getUserText());
+                return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
+            }
+        }
+
         DialogRagRetrieveResult rag = null;
         if (dialogRagProperties.isEnabled()) {
             rag = dialogRagRetrievalService.retrieve(req.getUserText(), kbId);

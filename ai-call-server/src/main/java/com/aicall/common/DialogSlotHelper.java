@@ -560,7 +560,36 @@ public final class DialogSlotHelper {
         if (isExplicitCustomerQuestion(u)) {
             return true;
         }
-        return ragHasPositiveMatch;
+        if (shouldPreferMainFlowAdvance(u)) {
+            return false;
+        }
+        return ragHasPositiveMatch && isExplicitCustomerQuestion(u);
+    }
+
+    /**
+     * 短答/语气/暂缓/未知额度等：优先推进主线，不走 RAG+LLM。
+     */
+    public static boolean shouldPreferMainFlowAdvance(String userText) {
+        if (!StringUtils.hasText(userText) || isExplicitCustomerQuestion(userText)) {
+            return false;
+        }
+        if (isFollowUpComplaint(userText)) {
+            return false;
+        }
+        if (DialogScriptKeywordMatcher.looksLikeRefuse(userText)
+                || ForcedHangupRules.isUserFarewell(userText)) {
+            return false;
+        }
+        if (DialogScriptKeywordMatcher.looksLikeAccept(userText)) {
+            return true;
+        }
+        String n = userText.trim().replaceAll("[\\s，,。.!！?？~～、；;]+", "");
+        if (n.length() > 10) {
+            return false;
+        }
+        return n.contains("等一下") || n.contains("稍等") || n.contains("等会")
+                || n.contains("不知道") || n.contains("不清楚") || n.contains("没想好")
+                || n.equals("嗯") || n.equals("哦") || n.equals("啊");
     }
 
     /** 客户在问具体问题（利率/额度/身份/怎么办理等） */

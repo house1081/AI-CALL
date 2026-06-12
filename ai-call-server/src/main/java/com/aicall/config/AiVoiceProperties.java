@@ -99,8 +99,16 @@ public class AiVoiceProperties {
     private String asrLanguage = "zh-CN";
     /** 电话场景：phone_call（映射 DashScope paraformer-8k / HTTP model 参数） */
     private String asrModel = "phone_call";
-    /** DashScope 实际模型名；phone_call 时默认 paraformer-v1（8kHz 电话） */
-    private String asrDashscopeModel = "paraformer-v1";
+    /** DashScope 实际模型名；电话 8k 推荐 paraformer-8k-v2 */
+    private String asrDashscopeModel = "paraformer-8k-v2";
+    /** 本机无公网 URL 时用 Paraformer WebSocket 实时识别（映射 paraformer-realtime-8k-v2） */
+    private boolean asrParaformerRealtimeEnabled = true;
+    private int asrRealtimeTimeoutSec = 30;
+    /** 启动后 dummy 识别，吃掉 ASR 冷启动 */
+    private boolean asrWarmOnStartup = true;
+    /** 外呼任务开始前等待 RAG+ASR+TTS 预热 */
+    private boolean outboundReadyGateEnabled = true;
+    private long outboundReadyMaxWaitMs = 180_000L;
     private String asrAudioFormat = "pcm";
     /** VAD：连续静音达到该毫秒数才结束录音并送 ASR（与 user-silence-before-response-ms 对齐） */
     private boolean asrVadEnabled = true;
@@ -113,7 +121,7 @@ public class AiVoiceProperties {
     /** ASR 数字/金额逆文本归一化（ITN），电话场景建议开启 */
     private boolean asrEnableItn = true;
     /** ASR 领域提示，帮助识别贷款/额度等行业词汇 */
-    private String asrContextHint = "金融贷款外呼电话，客户可能说额度、万、利率、周转等。";
+    private String asrContextHint = "额度,万,利率,周转,征信,抵押,听不清";
     /** 单轮最长录音（毫秒），超时仍未句末静音则整段送 ASR */
     private int asrRecordMaxMs = 12000;
     /** 从全程录音切给 ASR 的最大音频秒数（过长会拖慢识别） */
@@ -177,6 +185,16 @@ public class AiVoiceProperties {
     private String endingVoiceCacheDir = "./uploads/tts/ending";
     /** 对话话术 TTS 短语缓存目录 */
     private String ttsPhraseCacheDir = "./uploads/tts/phrases";
+    /** 是否启用话术 TTS 磁盘缓存（相同回答+音色复用 wav） */
+    private boolean ttsPhraseCacheEnabled = true;
+    /** 话术缓存内存索引上限（磁盘文件不受限） */
+    private int ttsPhraseCacheMaxEntries = 2048;
+    /** 问答级音频缓存：相同用户问题+音色直接复用 wav，跳过 LLM/TTS */
+    private boolean dialogReplyAudioCacheEnabled = true;
+    private String dialogReplyAudioCacheDir = "./uploads/tts/reply-cache";
+    private int dialogReplyAudioCacheMaxEntries = 1024;
+    private int dialogReplyAudioCacheMinUserChars = 2;
+    private int dialogReplyAudioCacheMaxUserChars = 80;
     /** CosyVoice 两次请求最小间隔（毫秒），缓解 428 */
     private int ttsMinIntervalMs = 1200;
     /** 触发 428 后全局冷却（毫秒）；0=关闭 */

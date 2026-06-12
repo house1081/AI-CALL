@@ -106,7 +106,6 @@ public class OutboundDialogLoopService {
             log.warn("[对话] 通道不存在 uuid={}", uuid);
             return CallStatus.CONNECTED;
         }
-        eslService.ensureOutboundMediaReady(uuid);
         boolean openingPlayed = false;
         if (voiceRuntimeSettingsService.isPlayOpeningOnAnswer()) {
             openingPlayed = openingPlaybackService.playOpening(uuid, callRecordId);

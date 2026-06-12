@@ -265,9 +265,27 @@ public final class ForcedHangupRules {
         return "我们主要做信用贷和周转贷，您大概想贷多少、用在哪方面？";
     }
 
+    /** 「不是拜拜」「别挂」等否定告别，勿误判挂机 */
+    public static boolean isNegatedFarewell(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String t = text.trim();
+        if (t.contains("不要挂") || t.contains("别挂") || t.contains("先别挂")) {
+            return true;
+        }
+        if (t.contains("不是") || t.contains("并没有") || t.contains("没有说") || t.contains("没说")) {
+            return containsAny(t, List.of("拜拜", "再见", "挂了", "先挂", "不聊", "再见"));
+        }
+        return false;
+    }
+
     /** 客户说再见、要挂机（含「88」等短告别） */
     public static boolean isUserFarewell(String text) {
         if (text == null || text.isBlank()) {
+            return false;
+        }
+        if (isNegatedFarewell(text)) {
             return false;
         }
         String t = text.trim().replaceAll("[\\s，,。.!！?？~～]+", "");

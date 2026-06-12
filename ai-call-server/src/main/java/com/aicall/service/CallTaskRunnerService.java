@@ -38,6 +38,7 @@ public class CallTaskRunnerService {
     private final OutboundCallWaitService outboundCallWaitService;
     private final CallTaskProgressService callTaskProgressService;
     private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
+    private final OutboundVoiceReadinessService outboundVoiceReadinessService;
 
     @Async
     public void runTask(Integer taskId) {
@@ -68,6 +69,8 @@ public class CallTaskRunnerService {
             callTaskMapper.updateById(task);
             return;
         }
+
+        outboundVoiceReadinessService.awaitReady();
 
         String mode = freeSwitchProperties.isEnabled() ? "FreeSWITCH" : "模拟外呼";
         log.info("外呼任务开始 id={} 计划客户={} 启用线路={} 模式={}",

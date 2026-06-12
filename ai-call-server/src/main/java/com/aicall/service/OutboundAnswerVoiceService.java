@@ -32,6 +32,7 @@ public class OutboundAnswerVoiceService {
     private final OutboundDialogLoopService outboundDialogLoopService;
     private final OllamaChatService ollamaChatService;
     private final OpeningVoicePrewarmService openingVoicePrewarmService;
+    private final OpeningPlaybackService openingPlaybackService;
     private final OutboundNoAnswerService outboundNoAnswerService;
 
     private final ExecutorService watchExecutor = Executors.newCachedThreadPool(r -> {
@@ -132,9 +133,8 @@ public class OutboundAnswerVoiceService {
                 eslService.ensureOutboundMediaReady(fsUuid);
                 String openingText = resolveOpeningText();
                 openingVoicePrewarmService.schedule(fsUuid, openingText);
-                int delay = Math.max(0, aiVoiceProperties.getAnswerPlayDelayMs());
-                if (delay > 0) {
-                    Thread.sleep(delay);
+                if (aiVoiceProperties.isDialogEnabled()) {
+                    openingPlaybackService.fireCachedOpeningOnAnswer(fsUuid);
                 }
                 CallSessionService.StartReq start = new CallSessionService.StartReq();
                 start.setFsUuid(fsUuid);

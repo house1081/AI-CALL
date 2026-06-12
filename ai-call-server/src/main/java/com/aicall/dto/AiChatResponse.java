@@ -19,4 +19,6 @@ public class AiChatResponse {
     private Boolean streamedTtsPlayed;
     /** 流式首句+补播已在 voiceTurn 内等待播完，对话循环无需再 waitPlayback */
     private Boolean playbackWaitHandled;
+    /** 本轮应答来自问答音频缓存（未调 LLM） */
+    private Boolean fromReplyAudioCache;
 }

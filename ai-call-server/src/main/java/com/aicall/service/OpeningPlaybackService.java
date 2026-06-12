@@ -29,15 +29,42 @@ public class OpeningPlaybackService {
     private final OpeningPlaybackGuard openingPlaybackGuard;
 
     /**
+     * 摘机检测线程立即下发预录开场白（仅 ESL 播放，不等待播完）。
+     */
+    public void fireCachedOpeningOnAnswer(String uuid) {
+        if (!StringUtils.hasText(uuid) || !voiceRuntimeSettingsService.isPlayOpeningOnAnswer()) {
+            return;
+        }
+        if (!eslService.uuidExists(uuid)) {
+            return;
+        }
+        if (!openingPlaybackGuard.markPlayedIfAbsent(uuid)) {
+            return;
+        }
+        try {
+            if (tryPlayCachedOpening(uuid)) {
+                log.info("[开场白] 摘机即播 uuid={}", uuid);
+            } else {
+                openingPlaybackGuard.clear(uuid);
+            }
+        } catch (Exception e) {
+            openingPlaybackGuard.clear(uuid);
+            log.debug("[开场白] 摘机即播失败 uuid={}: {}", uuid, e.getMessage());
+        }
+    }
+
+    /**
      * @return 是否已向 FS 下发播放（通道不存在时 false；已播过则 true 且不再重复播）
      */
     public boolean playOpening(String uuid, Integer callRecordId) throws Exception {
         if (!StringUtils.hasText(uuid) || callRecordId == null) {
             return false;
         }
+        if (openingPlaybackGuard.hasPlayed(uuid)) {
+            return finishOpeningPlayback(uuid, callRecordId, "摘机即播");
+        }
         if (!openingPlaybackGuard.markPlayedIfAbsent(uuid)) {
-            log.info("[开场白] 本通道已播过，跳过重复 uuid={} recordId={}", uuid, callRecordId);
-            return true;
+            return finishOpeningPlayback(uuid, callRecordId, "并发跳过");
         }
         if (!voiceRuntimeSettingsService.isPlayOpeningOnAnswer()) {
             log.info("[开场白] 后台已关闭接通播报 uuid={} recordId={}", uuid, callRecordId);
@@ -53,10 +80,6 @@ public class OpeningPlaybackService {
 
         long t0 = System.currentTimeMillis();
         eslService.ensureOutboundMediaReady(uuid);
-        int settleMs = Math.max(0, aiVoiceProperties.getAnswerPlayDelayMs());
-        if (settleMs > 0) {
-            Thread.sleep(settleMs);
-        }
 
         boolean played = tryPlayCachedOpening(uuid);
         if (!played) {
@@ -68,12 +91,26 @@ public class OpeningPlaybackService {
         if (!played) {
             log.error("[开场白] 预录音与实时 TTS 均失败 uuid={} recordId={}，请检查 CosyVoice 配置与 FS 播放路径",
                     uuid, callRecordId);
+            openingPlaybackGuard.clear(uuid);
             return false;
         }
         voicePlaybackService.waitPlaybackFinished(uuid, opening);
         callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
         log.info("[开场白] 播完 uuid={} recordId={} mode=turn-based 接通至开播白约{}ms",
                 uuid, callRecordId, System.currentTimeMillis() - t0);
+        return true;
+    }
+
+    private boolean finishOpeningPlayback(String uuid, Integer callRecordId, String reason) throws Exception {
+        if (!eslService.uuidExists(uuid)) {
+            return false;
+        }
+        String opening = resolveOpeningText();
+        DialogTranscriptLog.opening(callRecordId, uuid, opening);
+        callDialogPersistService.appendAssistant(callRecordId, opening);
+        voicePlaybackService.waitPlaybackFinished(uuid, opening);
+        callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
+        log.info("[开场白] {} 等待播完 uuid={} recordId={}", reason, uuid, callRecordId);
         return true;
     }
 

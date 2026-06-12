@@ -98,9 +98,9 @@ ai-voice:
   answer-watch-seconds: 50
   answer-max-ring-count: 10
   answer-ring-cycle-sec: 4
-  answer-play-delay-ms: 20
-  opening-prewarm-wait-ms: 200
-  answer-watch-poll-ms: 250
+  answer-play-delay-ms: 0
+  opening-prewarm-wait-ms: 100
+  answer-watch-poll-ms: 150
   # cosyvoice=DashScope 仿真人声；http=外部 TTS；speak=FS 机械音
   tts-mode: cosyvoice
   tts-model: cosyvoice-v3-plus
@@ -146,14 +146,19 @@ ai-voice:
   speak-voice: en|flite
   speak-fallback-voices: en|callie,eng|flite
   # 单轮播报软上限（SpeakTextLimiter 按句号/逗号截断，保证语句完整）
-  max-speak-chars: 40
+  max-speak-chars: 32
   # 流式首句 TTS 触发字数（越小开口越快，建议 8~14）
   stream-tts-first-chunk-chars: 8
   # 整句一次性识别，杜绝流式等待延迟
   asr-mode: sentence
   asr-stream-enabled: false
-  # 本机开发用 qwen3-asr-flash（base64 直传）；生产公网 URL 可用 paraformer-8k-v2 / paraformer-v1
-  asr-dashscope-model: qwen3-asr-flash
+  # 电话 8k：paraformer-8k-v2（本机走 WebSocket 实时；公网可走文件转写）
+  asr-dashscope-model: paraformer-8k-v2
+  asr-paraformer-realtime-enabled: true
+  asr-realtime-timeout-sec: 30
+  asr-warm-on-startup: true
+  outbound-ready-gate-enabled: true
+  outbound-ready-max-wait-ms: 180000
   dialog-llm-max-tokens: 48
   # 略增随机性，回复更口语自然（仍受 Prompt/RAG 约束）
   dialog-llm-temperature: 0.45
@@ -173,13 +178,14 @@ ai-voice:
   asr-read-timeout-ms: 45000
   # ASR：句末静音与 user-silence-before-response-ms 对齐（说完一句再识别）
   asr-vad-enabled: true
-  asr-vad-silence-ms: 200
+  asr-vad-silence-ms: 160
   asr-vad-min-speech-ms: 150
   asr-vad-poll-ms: 10
   asr-vad-energy-threshold: 200
   asr-input-gain: 2.2
   asr-enable-itn: true
-  asr-context-hint: "金融贷款外呼电话，客户可能说额度、万、利率、周转、抵押、征信、银行、公司、听不清等。"
+  # 短关键词热词，避免 qwen3-asr 把长句提示整句当成客户说话
+  asr-context-hint: "额度,万,利率,周转,征信,抵押,听不清"
   # 客户 5～8s 无有效语音时 AI 主动询问（第1/2/3次：5s/6s/8s）
   dialog-silence-probe-enabled: true
   dialog-silence-probe-ms: 6000
@@ -212,19 +218,26 @@ ai-voice:
   dialog-max-history-rounds: 8
   dialog-llm-async: false
   dialog-llm-stream: true
-  # 流式首句 TTS + LLM 结束后自动补播剩余（CallAiVoiceService）
-  dialog-llm-stream-tts: true
+  # 整段一次 TTS 更快；流式首句在电话场景实测更慢
+  dialog-llm-stream-tts: false
   dialog-llm-timeout-sec: 12
   opening-voice-precache-enabled: true
   opening-voice-precache-on-startup: false
   opening-voice-cache-dir: ./uploads/tts/opening
   tts-phrase-cache-dir: ./uploads/tts/phrases
+  tts-phrase-cache-enabled: true
+  tts-phrase-cache-max-entries: 2048
+  dialog-reply-audio-cache-enabled: true
+  dialog-reply-audio-cache-dir: ./uploads/tts/reply-cache
+  dialog-reply-audio-cache-max-entries: 1024
+  dialog-reply-audio-cache-min-user-chars: 2
+  dialog-reply-audio-cache-max-user-chars: 80
   tts-min-interval-ms: 600
   tts-rate-limit-cooldown-ms: 1500
   tts-rate-limit-retries: 0
-  tts-phrase-warm-on-startup: false
-  # 服务就绪后延迟预合成开场白（毫秒），过大会拖慢首通；保存/启用话术会立即触发
-  opening-voice-precache-delay-ms: 8000
+  tts-phrase-warm-on-startup: true
+  # 外呼就绪门控开启时 TTS 预热在 ASR 之后立即执行；关闭门控时仍可用此延迟错开首通
+  opening-voice-precache-delay-ms: 0
   startup-quiet: true
   playback-barge-in-energy-threshold: 320
   # 全程录音会混入 TTS，分段模式默认关闭插嘴，保证用户听完整句

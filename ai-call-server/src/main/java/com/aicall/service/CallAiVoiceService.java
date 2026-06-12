@@ -17,8 +17,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -54,6 +56,7 @@ public class CallAiVoiceService {
     private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
     private final DialogTurnRegistry dialogTurnRegistry;
     private final TtsProsodyService ttsProsodyService;
+    private final DialogReplyAudioCacheService dialogReplyAudioCacheService;
 
     public void onCallAnswered(String fsUuid, Integer callRecordId) {
         if (!aiVoiceProperties.isEnabled() || !voiceRuntimeSettingsService.isPlayOpeningOnAnswer()) {
@@ -145,6 +148,10 @@ public class CallAiVoiceService {
 
     private AiChatResponse voiceTurnDialog(AiChatRequest req) throws Exception {
         long turnStart = System.currentTimeMillis();
+        Optional<AiChatResponse> cachedReply = tryReplyAudioCache(req, turnStart);
+        if (cachedReply.isPresent()) {
+            return cachedReply.get();
+        }
         AtomicBoolean streamTtsStarted = new AtomicBoolean(false);
         AtomicReference<String> streamTtsPrefix = new AtomicReference<>("");
         AtomicReference<CompletableFuture<Void>> streamFirstPlayFuture = new AtomicReference<>();
@@ -184,6 +191,7 @@ public class CallAiVoiceService {
                 } else {
                     playText(req.getFsUuid(), toPlay);
                 }
+                storeReplyAudioCache(req, toPlay, r);
                 log.info("[对话播报] uuid={} 整段就绪 距本轮回话开始{}ms streamTts={}",
                         req.getFsUuid(), System.currentTimeMillis() - turnStart, streamTtsStarted.get());
             } else {
@@ -191,6 +199,88 @@ public class CallAiVoiceService {
             }
         }
         return r;
+    }
+
+    private Optional<AiChatResponse> tryReplyAudioCache(AiChatRequest req, long turnStart) {
+        if (!dialogReplyAudioCacheService.isEnabled()
+                || aiVoiceProperties.isDialogLlmStreamTts()
+                || !StringUtils.hasText(req.getUserText())) {
+            return Optional.empty();
+        }
+        Optional<DialogReplyAudioCacheService.CachedReply> hit =
+                dialogReplyAudioCacheService.lookup(req.getUserText(), null);
+        if (hit.isEmpty()) {
+            log.debug("[问答缓存] 未命中 uuid={} question={}，走 LLM+TTS",
+                    req.getFsUuid(), abbreviateUser(req.getUserText()));
+            return Optional.empty();
+        }
+        if (!isValidReplyCacheWav(hit.get().wavPath())) {
+            log.warn("[问答缓存] wav 无效，回退 LLM+TTS uuid={} question={}",
+                    req.getFsUuid(), abbreviateUser(req.getUserText()));
+            return Optional.empty();
+        }
+        return Optional.of(buildCachedReplyResponse(req, hit.get(), turnStart));
+    }
+
+    private static boolean isValidReplyCacheWav(Path wav) {
+        if (wav == null || !Files.exists(wav)) {
+            return false;
+        }
+        try {
+            return Files.size(wav) > 44;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static String abbreviateUser(String text) {
+        if (!StringUtils.hasText(text)) {
+            return "";
+        }
+        String s = text.trim();
+        return s.length() <= 20 ? s : s.substring(0, 20) + "…";
+    }
+
+    private AiChatResponse buildCachedReplyResponse(AiChatRequest req,
+                                                    DialogReplyAudioCacheService.CachedReply hit,
+                                                    long turnStart) {
+        AiChatResponse r = new AiChatResponse();
+        r.setReply(hit.replyText());
+        r.setModel("reply-audio-cache");
+        r.setFromReplyAudioCache(true);
+        r.setLatencyMs(System.currentTimeMillis() - turnStart);
+        DialogTranscriptLog.aiReply(req.getCallRecordId(), req.getFsUuid(), hit.replyText(),
+                r.getModel(), false);
+        if (aiVoiceProperties.isEnabled() && StringUtils.hasText(req.getFsUuid())
+                && shouldPlayOnChannel(req.getFsUuid())) {
+            boolean ok = voicePlaybackService.playSynthesizedWav(req.getFsUuid(), hit.wavPath());
+            if (!ok) {
+                log.info("[问答缓存] wav 播放失败，回退实时 TTS 合成 uuid={}", req.getFsUuid());
+                playText(req.getFsUuid(), hit.replyText());
+            } else {
+                try {
+                    voicePlaybackService.waitPlaybackFinished(req.getFsUuid(), hit.replyText(), null);
+                } catch (Exception e) {
+                    log.debug("[问答缓存] 等待播完 uuid={}: {}", req.getFsUuid(), e.getMessage());
+                }
+            }
+            r.setPlaybackWaitHandled(true);
+            log.info("[问答缓存] 已播报 uuid={} 距回合开始{}ms", req.getFsUuid(),
+                    System.currentTimeMillis() - turnStart);
+        }
+        return r;
+    }
+
+    private void storeReplyAudioCache(AiChatRequest req, String replyText, AiChatResponse r) {
+        if (!dialogReplyAudioCacheService.isEnabled()
+                || Boolean.TRUE.equals(r.getFromReplyAudioCache())
+                || Boolean.TRUE.equals(r.getShouldHangup())
+                || Boolean.TRUE.equals(r.getStreamedTtsPlayed())
+                || !StringUtils.hasText(req.getUserText())
+                || !StringUtils.hasText(replyText)) {
+            return;
+        }
+        dialogReplyAudioCacheService.store(req.getUserText(), replyText, null);
     }
 
     private boolean shouldPlayOnChannel(String fsUuid) {

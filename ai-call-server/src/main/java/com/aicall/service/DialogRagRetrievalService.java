@@ -42,10 +42,10 @@ public class DialogRagRetrievalService {
             return;
         }
         rebuildIndex();
-        indexLoaded = true;
     }
 
     public void rebuildIndex() {
+        indexLoaded = false;
         vectorStore.clear();
         List<DialogTrainingQa> rows = dialogTrainingQaMapper.selectList(
                 new LambdaQueryWrapper<DialogTrainingQa>().eq(DialogTrainingQa::getStatus, 1));
@@ -57,6 +57,11 @@ public class DialogRagRetrievalService {
         }
         log.info("[RAG] 向量索引重建完成 入库={}/{}", ok, rows.size());
         dialogScriptPackRegistry.reloadFromDb();
+        indexLoaded = true;
+    }
+
+    public boolean isIndexReady() {
+        return indexLoaded;
     }
 
     public boolean indexOne(DialogTrainingQa row) {
