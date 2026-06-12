@@ -1,0 +1,8 @@
+# 本地开发依赖：仅 Redis（MySQL 请用本机 3306 已安装的 ai-call 库）
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass root
+    restart: unless-stopped
