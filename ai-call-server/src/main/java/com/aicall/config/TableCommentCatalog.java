@@ -4,12 +4,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** 数据库表/字段中文注释定义 */
-final class TableCommentCatalog {
+public final class TableCommentCatalog {
 
     private TableCommentCatalog() {
     }
 
-    static Map<String, String> tableComments() {
+    public static Map<String, String> tableComments() {
         Map<String, String> m = new LinkedHashMap<>();
         m.put("admin_user", "总后台管理员账号");
         m.put("price_config", "费率档位默认售价配置");
@@ -39,7 +39,7 @@ final class TableCommentCatalog {
         return m;
     }
 
-    static Map<String, Map<String, String>> columnComments() {
+    public static Map<String, Map<String, String>> columnComments() {
         Map<String, Map<String, String>> all = new LinkedHashMap<>();
         cols(all, "admin_user", map(
                 "id", "主键",

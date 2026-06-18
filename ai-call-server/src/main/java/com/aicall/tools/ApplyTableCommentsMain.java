@@ -1,6 +1,5 @@
 package com.aicall.tools;
 
-import com.aicall.config.TableCommentCatalog;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
