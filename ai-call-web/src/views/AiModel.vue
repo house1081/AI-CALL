@@ -14,6 +14,16 @@
           任务可单独覆盖。
         </p>
       </el-form-item>
+      <el-form-item label="外呼对话模式">
+        <el-radio-group v-model="voiceRuntime.outboundDialogMode">
+          <el-radio value="ai_realtime">AI 实时对话（默认）</el-radio>
+          <el-radio value="smart_prerecord">智能预录外呼</el-radio>
+        </el-radio-group>
+        <p class="voice-hint">
+          AI 实时：ASR → LLM → CosyVoice TTS；遇 TTS 失败或客户连续抱怨答非所问时自动切入预录熔断。
+          智能预录：全程 ASR 匹配高频问答录音，冷门问题转专业顾问（须在<a href="/prerecord-outbound" style="color:#409eff">预录外呼</a>配置题库与录音）。
+        </p>
+      </el-form-item>
       <el-form-item label="接通播报">
         <el-switch v-model="voiceRuntime.playOpeningOnAnswer" active-text="接通后 AI 先打招呼" inactive-text="不播报" />
       </el-form-item>
@@ -274,7 +284,8 @@ const saveVoiceRuntime = async () => {
     ttsVoiceMode: mode,
     cosyvoiceCloneVoiceId: voiceRuntime.value.cosyvoiceCloneVoiceId,
     cosyvoiceSystemVoice: voiceRuntime.value.cosyvoiceSystemVoice,
-    playOpeningOnAnswer: voiceRuntime.value.playOpeningOnAnswer
+    playOpeningOnAnswer: voiceRuntime.value.playOpeningOnAnswer,
+    outboundDialogMode: voiceRuntime.value.outboundDialogMode || 'ai_realtime'
   })
   ElMessage.success('已保存，将排队为全部音色预生成开场白/结束语')
   await loadVoiceRuntime()

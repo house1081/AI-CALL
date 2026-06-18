@@ -3,6 +3,7 @@ package com.aicall.service;
 import com.aicall.common.CallStatus;
 import com.aicall.common.HangupType;
 import com.aicall.config.FreeSwitchProperties;
+import com.aicall.service.prerecord.PrerecordPlaybackService;
 import com.aicall.dto.SensitiveWordMatch;
 import com.aicall.entity.CallRecord;
 import com.aicall.entity.RiskConfig;
@@ -35,6 +36,7 @@ public class HumanTransferService {
     private final FreeSwitchEslService eslService;
     private final VoicePlaybackService voicePlaybackService;
     private final CallAiVoiceService callAiVoiceService;
+    private final PrerecordPlaybackService prerecordPlaybackService;
     private final CallDialogPersistService callDialogPersistService;
     private final CallSessionService callSessionService;
     private final CallEndSummaryService callEndSummaryService;
@@ -47,6 +49,42 @@ public class HumanTransferService {
         t.setDaemon(true);
         return t;
     });
+
+    /** 预录外呼冷门问题转专业顾问（复用 FS bridge，无需敏感词命中） */
+    public boolean triggerAdvisorTransfer(String uuid, Integer callRecordId, String phone, String reason) {
+        if (!freeSwitchProperties.isEnabled() || !StringUtils.hasText(uuid) || callRecordId == null) {
+            return false;
+        }
+        RiskConfig cfg = riskControlService.config();
+        if (cfg.getHumanTransferEnabled() == null || cfg.getHumanTransferEnabled() != 1
+                || !StringUtils.hasText(cfg.getHumanTransferDest())) {
+            log.warn("[转顾问] 未配置转人工目标，请在风控配置中启用并填写 FS 转接目标");
+            callDialogPersistService.appendSystem(callRecordId, "转顾问失败：未配置坐席转接目标");
+            return false;
+        }
+        String lockKey = KEY_TRANSFERRED + callRecordId;
+        if (!Boolean.TRUE.equals(redisTemplate.opsForValue().setIfAbsent(lockKey, uuid, Duration.ofHours(4)))) {
+            return true;
+        }
+        try {
+            log.info("[转顾问] 预录冷门转人工 uuid={} recordId={} reason={}", uuid, callRecordId, reason);
+            callDialogPersistService.appendSystem(callRecordId, "冷门问题转专业信贷顾问");
+            markHangupType(callRecordId);
+            voicePlaybackService.stopChannelPlayback(uuid);
+            boolean ok = bridgeToAgent(uuid, cfg.getHumanTransferDest().trim());
+            if (!ok) {
+                callDialogPersistService.appendSystem(callRecordId, "转顾问失败，请检查 FS 转接目标");
+                redisTemplate.delete(lockKey);
+                return false;
+            }
+            callDialogPersistService.appendSystem(callRecordId, "已转接专业信贷顾问");
+            return true;
+        } catch (Exception e) {
+            log.error("[转顾问] 异常 uuid={} recordId={}: {}", uuid, callRecordId, e.getMessage(), e);
+            redisTemplate.delete(lockKey);
+            return false;
+        }
+    }
 
     /**
      * 检测客户话术，命中则发起转人工。
@@ -99,12 +137,8 @@ public class HumanTransferService {
 
             voicePlaybackService.stopChannelPlayback(uuid);
 
-            String prompt = StringUtils.hasText(cfg.getHumanTransferPrompt())
-                    ? cfg.getHumanTransferPrompt().trim()
-                    : "我马上为您转接人工坐席，请稍等";
-            if (StringUtils.hasText(prompt) && eslService.uuidExists(uuid)) {
-                callAiVoiceService.playText(uuid, prompt);
-                voicePlaybackService.waitPlaybackFinished(uuid, prompt);
+            if (!playTransferPrompt(uuid, cfg)) {
+                log.warn("[转人工] 转接提示音播放失败 uuid={}", uuid);
             }
 
             boolean ok = bridgeToAgent(uuid, cfg.getHumanTransferDest().trim());
@@ -121,6 +155,31 @@ public class HumanTransferService {
         } catch (Exception e) {
             log.error("[转人工] 异常 uuid={} recordId={}: {}", uuid, callRecordId, e.getMessage(), e);
             redisTemplate.delete(lockKey);
+            return false;
+        }
+    }
+
+    private boolean playTransferPrompt(String uuid, RiskConfig cfg) {
+        if (!eslService.uuidExists(uuid)) {
+            return false;
+        }
+        try {
+            return prerecordPlaybackService.playTransferSequence(uuid);
+        } catch (Exception e) {
+            log.debug("[转人工] 预录转接提示不可用 uuid={}: {}", uuid, e.getMessage());
+        }
+        String prompt = StringUtils.hasText(cfg.getHumanTransferPrompt())
+                ? cfg.getHumanTransferPrompt().trim()
+                : "我马上为您转接人工坐席，请稍等";
+        if (!StringUtils.hasText(prompt)) {
+            return false;
+        }
+        try {
+            callAiVoiceService.playText(uuid, prompt);
+            voicePlaybackService.waitPlaybackFinished(uuid, prompt);
+            return true;
+        } catch (Exception e) {
+            log.debug("[转人工] TTS 转接提示失败 uuid={}: {}", uuid, e.getMessage());
             return false;
         }
     }

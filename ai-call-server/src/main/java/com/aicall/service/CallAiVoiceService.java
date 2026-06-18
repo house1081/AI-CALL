@@ -44,6 +44,12 @@ public class CallAiVoiceService {
         return t;
     });
 
+    private static final Executor REPLY_CACHE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "reply-cache-store");
+        t.setDaemon(true);
+        return t;
+    });
+
     private final AiVoiceProperties aiVoiceProperties;
     private final FreeSwitchProperties freeSwitchProperties;
     private final OllamaChatService ollamaChatService;
@@ -57,6 +63,7 @@ public class CallAiVoiceService {
     private final DialogTurnRegistry dialogTurnRegistry;
     private final TtsProsodyService ttsProsodyService;
     private final DialogReplyAudioCacheService dialogReplyAudioCacheService;
+    private final com.aicall.service.prerecord.PrerecordCircuitService prerecordCircuitService;
 
     public void onCallAnswered(String fsUuid, Integer callRecordId) {
         if (!aiVoiceProperties.isEnabled() || !voiceRuntimeSettingsService.isPlayOpeningOnAnswer()) {
@@ -280,7 +287,10 @@ public class CallAiVoiceService {
                 || !StringUtils.hasText(replyText)) {
             return;
         }
-        dialogReplyAudioCacheService.store(req.getUserText(), replyText, null);
+        String userText = req.getUserText();
+        CompletableFuture.runAsync(
+                () -> dialogReplyAudioCacheService.store(userText, replyText, null),
+                REPLY_CACHE_EXECUTOR);
     }
 
     private boolean shouldPlayOnChannel(String fsUuid) {
@@ -439,6 +449,7 @@ public class CallAiVoiceService {
                 log.warn("播报失败：通话通道已结束（客户挂机或 FS 超时）uuid={}", fsUuid);
                 return;
             }
+            prerecordCircuitService.recordTtsFailure(fsUuid);
             throw new TtsSynthesisException("所有播报方式均失败", false);
         }
     }

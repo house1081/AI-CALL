@@ -1,6 +1,7 @@
 package com.aicall.service;
 
 import com.aicall.config.AiVoiceProperties;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -17,11 +18,18 @@ public class DialogLlmExecutorService {
 
     private final AiVoiceProperties aiVoiceProperties;
 
-    private final ExecutorService executor = Executors.newFixedThreadPool(6, r -> {
-        Thread t = new Thread(r, "dialog-llm");
-        t.setDaemon(true);
-        return t;
-    });
+    private ExecutorService executor;
+
+    @PostConstruct
+    void initPool() {
+        int size = Math.max(2, Math.min(32, aiVoiceProperties.getDialogLlmPoolSize()));
+        executor = Executors.newFixedThreadPool(size, r -> {
+            Thread t = new Thread(r, "dialog-llm");
+            t.setDaemon(true);
+            return t;
+        });
+        log.info("[对话LLM] 线程池已初始化 size={}", size);
+    }
 
     public <T> T run(SupplierThrowing<T> task) throws Exception {
         if (!aiVoiceProperties.isDialogLlmAsync()) {

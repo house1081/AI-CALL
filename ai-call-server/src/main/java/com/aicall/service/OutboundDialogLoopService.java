@@ -12,10 +12,15 @@ import com.aicall.mapper.CallRecordMapper;
 import com.aicall.dto.AiChatMessage;
 import com.aicall.dto.AiChatRequest;
 import com.aicall.dto.AiChatResponse;
+import com.aicall.dto.CallSessionMeta;
 import com.aicall.dto.HangupDecision;
+import com.aicall.dto.PrerecordTurnResultDto;
+import com.aicall.service.prerecord.PrerecordCircuitService;
+import com.aicall.service.prerecord.PrerecordOutboundService;
 import com.aicall.util.DialogTranscriptLog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -54,6 +59,10 @@ public class OutboundDialogLoopService {
     private final DialogMainFlowService dialogMainFlowService;
     private final DialogTurnRegistry dialogTurnRegistry;
     private final TtsFailureRecoveryService ttsFailureRecoveryService;
+    private final PrerecordCircuitService prerecordCircuitService;
+    private final ObjectProvider<PrerecordOutboundService> prerecordOutboundServiceProvider;
+    private final CallSessionMetaService callSessionMetaService;
+    private final CallContextCacheService callContextCacheService;
 
     private static final int MIN_SPEECH_WAV_BYTES = 4000;
 
@@ -61,11 +70,17 @@ public class OutboundDialogLoopService {
         if (!StringUtils.hasText(uuid) || callRecordId == null) {
             return;
         }
+        log.info("[对话] run 入口 uuid={} recordId={} thread={}",
+                uuid, callRecordId, Thread.currentThread().getName());
         outboundDialogRegistry.register(uuid);
         dialogTurnRegistry.register(uuid);
-        log.info("[对话] run 入口 uuid={} recordId={}", uuid, callRecordId);
+        callDialogPersistService.bindCall(callRecordId);
+        callSessionMetaService.bind(callRecordId);
+        callContextCacheService.bind(callRecordId);
+        log.debug("[对话] 会话快照已绑定 uuid={} recordId={}", uuid, callRecordId);
         Integer taskId = resolveTaskId(callRecordId);
         voiceRuntimeSettingsService.bindCallSilenceProfile(uuid, taskId);
+        prerecordCircuitService.bindCall(uuid);
         voiceRuntimeSettingsService.logEffectiveVoiceProfile("接通 uuid=" + uuid, taskId);
         long callStart = System.currentTimeMillis();
         int endCallStatus = CallStatus.CONNECTED;
@@ -97,6 +112,11 @@ public class OutboundDialogLoopService {
             outboundDialogRegistry.unregister(uuid);
             dialogTurnRegistry.unregister(uuid);
             voiceRuntimeSettingsService.unbindCallSilenceProfile(uuid);
+            prerecordCircuitService.clearCall(uuid);
+            callDialogPersistService.flushToDb(callRecordId);
+            callDialogPersistService.unbindCall(callRecordId);
+            callSessionMetaService.unbind(callRecordId);
+            callContextCacheService.unbind(callRecordId);
         }
     }
 
@@ -126,6 +146,10 @@ public class OutboundDialogLoopService {
         if (callRecordId == null) {
             return null;
         }
+        CallSessionMeta meta = callSessionMetaService.get(callRecordId);
+        if (meta != null && meta.getTaskId() != null) {
+            return meta.getTaskId();
+        }
         CallRecord record = callRecordMapper.selectById(callRecordId);
         return record != null ? record.getTaskId() : null;
     }
@@ -136,6 +160,12 @@ public class OutboundDialogLoopService {
             String opening = openingPlaybackService.resolveOpeningText();
             appendHistory(history, "assistant", opening);
             dialogTurnRegistry.afterOpeningPlayback(uuid);
+            try {
+                voicePlaybackService.waitPlaybackFinished(uuid, opening);
+            } catch (Exception e) {
+                log.debug("[对话] 等待开场白播完 uuid={}: {}", uuid, e.getMessage());
+            }
+            callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
             log.info("[对话] 预录开场白已播，等待客户说话 uuid={} recordId={}", uuid, callRecordId);
         } else {
             playModelOpeningTurnBased(uuid, callRecordId, history);
@@ -293,9 +323,8 @@ public class OutboundDialogLoopService {
             turn.setUserText(userText);
             turn.setCallRecordId(callRecordId);
             turn.setFsUuid(uuid);
-            List<AiChatMessage> callHistory = callDialogPersistService.loadChatHistory(callRecordId);
-            turn.setHistory(new ArrayList<>(callHistory));
-            log.info("[对话上下文] recordId={} uuid={} 本通历史条数={}", callRecordId, uuid, callHistory.size());
+            turn.setHistory(new ArrayList<>(history));
+            log.info("[对话上下文] recordId={} uuid={} 本通历史条数={}", callRecordId, uuid, history.size());
             turn.setBusinessProbeThisTurn(lastBusinessProbe);
             if (!eslService.uuidExists(uuid) || outboundDialogRegistry.isCancelled(uuid)) {
                 log.info("[对话] 通道已断开或已取消，停止对话 uuid={}", uuid);
@@ -308,6 +337,39 @@ public class OutboundDialogLoopService {
                 continue;
             }
             dialogTurnRegistry.aiTakesFloor(uuid);
+            prerecordCircuitService.recordOffTopicComplaint(uuid, userText);
+
+            boolean smartPrerecord = voiceRuntimeSettingsService.isSmartPrerecordMode();
+            boolean usePrerecord = prerecordCircuitService.shouldUsePrerecord(uuid, smartPrerecord);
+            if (usePrerecord) {
+                PrerecordTurnResultDto pre = prerecordOutboundServiceProvider.getObject().handleTurn(
+                        uuid, callRecordId, resolveCustomerPhone(callRecordId), userText, !smartPrerecord);
+                if (pre.isHandled()) {
+                    if (pre.isTransferred()) {
+                        return CallStatus.CONNECTED;
+                    }
+                    if (StringUtils.hasText(pre.getReplyText())) {
+                        callDialogPersistService.appendAssistant(callRecordId, pre.getReplyText());
+                        appendHistory(history, "assistant", pre.getReplyText());
+                        lastAiSpeechMs = System.currentTimeMillis();
+                    }
+                    if (pre.isShouldHangup()) {
+                        endedByHangup = true;
+                        if (eslService.uuidExists(uuid)) {
+                            eslService.hangupChannel(uuid, "prerecord-refuse");
+                        }
+                        break;
+                    }
+                    dialogTurnRegistry.aiYieldsFloor(uuid);
+                    callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
+                    rounds++;
+                    continue;
+                }
+                if (smartPrerecord && !pre.isHandled()) {
+                    log.info("[预录外呼] 智能预录未命中 uuid={}，回退 AI 实时对话", uuid);
+                }
+            }
+
             AiChatResponse resp = callAiVoiceService.voiceTurn(turn);
             long llmElapsed = System.currentTimeMillis() - replyStart;
             log.info("[LLM] uuid={} model={} 耗时={}ms replyLen={} hangup={}",
@@ -391,6 +453,7 @@ public class OutboundDialogLoopService {
                 if (StringUtils.hasText(text)) {
                     return new AsrListenResult(text, false);
                 }
+                log.warn("[ASR] 有录音但未识别 uuid={} bytes={}", uuid, size);
                 return new AsrListenResult("", size >= MIN_SPEECH_WAV_BYTES);
             } catch (NoSpeechDetectedException e) {
                 log.debug("[对话] 未检测到客户说话 uuid={}，继续监听", uuid);
@@ -615,6 +678,10 @@ public class OutboundDialogLoopService {
     private String resolveCustomerPhone(Integer callRecordId) {
         if (callRecordId == null) {
             return null;
+        }
+        CallSessionMeta meta = callSessionMetaService.get(callRecordId);
+        if (meta != null && StringUtils.hasText(meta.getCustomerPhone())) {
+            return meta.getCustomerPhone();
         }
         CallRecord record = callRecordMapper.selectById(callRecordId);
         return record != null ? record.getCustomerPhone() : null;

@@ -26,6 +26,10 @@ public class VoiceRuntimeConfigDto {
     private String defaultCosyvoiceCloneVoiceId;
     /** 接通后是否播报开场白 */
     private Boolean playOpeningOnAnswer;
+    /** ai_realtime=AI实时对话 | smart_prerecord=智能预录外呼 */
+    private String outboundDialogMode;
+    /** 只读：当前外呼模式说明 */
+    private String outboundDialogModeLabel;
     /** 只读：当前是否已配置 DashScope Key */
     private Boolean dashScopeConfigured;
     /** 只读：当前 CosyVoice 合成模型（须与复刻 target_model 一致） */

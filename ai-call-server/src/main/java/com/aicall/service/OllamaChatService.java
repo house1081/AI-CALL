@@ -41,6 +41,7 @@ public class OllamaChatService {
     private final DialogRagProperties dialogRagProperties;
     private final DialogMainFlowService dialogMainFlowService;
     private final DialogCallContextService dialogCallContextService;
+    private final CallContextCacheService callContextCacheService;
 
     public AiPrompt activePrompt() {
         AiPrompt p = aiPromptMapper.selectOne(
@@ -77,7 +78,9 @@ public class OllamaChatService {
      */
     public AiChatResponse chat(AiChatRequest req, Consumer<String> onSentence) {
         AiModelConfig modelCfg = aiModelConfigService.requireActive();
-        DialogCallContext ctx = dialogCallContextService.resolve(req.getCallRecordId());
+        DialogCallContext ctx = req.getCallRecordId() != null
+                ? callContextCacheService.get(req.getCallRecordId())
+                : dialogCallContextService.resolve(req.getCallRecordId());
         AiPrompt prompt = ctx.getPrompt() != null ? ctx.getPrompt() : activePrompt();
         int kbId = ctx.hasKb() ? ctx.getKbId() : DialogCallContextService.DEFAULT_KB_ID;
         long start = System.currentTimeMillis();
@@ -747,7 +750,9 @@ public class OllamaChatService {
         if (req.getCallRecordId() == null || !StringUtils.hasText(reply)) {
             return false;
         }
-        DialogCallContext ctx = dialogCallContextService.resolve(req.getCallRecordId());
+        DialogCallContext ctx = req.getCallRecordId() != null
+                ? callContextCacheService.get(req.getCallRecordId())
+                : dialogCallContextService.resolve(req.getCallRecordId());
         int kbId = ctx.hasKb() ? ctx.getKbId() : DialogCallContextService.DEFAULT_KB_ID;
         if (!dialogMainFlowService.isEnabled(kbId)) {
             return false;
@@ -831,6 +836,8 @@ public class OllamaChatService {
         sb.append("客户已说清的信息不要再问；需要澄清时语气柔和。");
         sb.append("客户说纯数字或「八十」「五十」等时，在问额度场景下理解为「八十万」「五十万」，禁止再说没听清。");
         if (aiVoiceProperties.isDialogLlmPrimary() && history != null && !history.isEmpty()) {
+            sb.append("\n\n【上下文提示】下方消息列表已含完整对话，请结合客户最新一句回复，勿重复已问过的问题。");
+        } else if (history != null && !history.isEmpty()) {
             sb.append("\n\n【完整对话记录（请结合上下文回复，勿重复已问过的问题）】\n");
             appendTranscript(sb, history);
             sb.append("客户：").append(currentUser.trim());

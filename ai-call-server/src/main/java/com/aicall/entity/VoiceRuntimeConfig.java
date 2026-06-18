@@ -22,5 +22,7 @@ public class VoiceRuntimeConfig {
     private String cosyvoiceSystemVoice;
     /** 1=接通后播报开场白（后台控制） */
     private Integer playOpeningOnAnswer;
+    /** ai_realtime | smart_prerecord */
+    private String outboundDialogMode;
     private LocalDateTime updateTime;
 }

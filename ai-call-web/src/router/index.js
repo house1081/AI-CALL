@@ -13,6 +13,7 @@ const routes = [
       { path: 'price', component: () => import('../views/Price.vue') },
       { path: 'ai-prompt', component: () => import('../views/AiPrompt.vue') },
       { path: 'ai-model', component: () => import('../views/AiModel.vue') },
+      { path: 'prerecord-outbound', component: () => import('../views/PrerecordOutbound.vue') },
       { path: 'ai-chat-lab', component: () => import('../views/AiChatLab.vue') },
       { path: 'dialog-training', component: () => import('../views/DialogTraining.vue') },
       { path: 'risk', component: () => import('../views/Risk.vue') },

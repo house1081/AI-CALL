@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
@@ -45,6 +47,8 @@ public class TtsPhraseCacheService {
 
     private volatile boolean commonPhrasesWarmed;
     private volatile boolean phraseWarmComplete;
+
+    private final ConcurrentHashMap<String, CompletableFuture<Path>> inFlight = new ConcurrentHashMap<>();
 
     /** 启动后后台预热静默追问/没听清等高频话术，降低首通 TTS 延迟 */
     @EventListener(ContextRefreshedEvent.class)
@@ -184,35 +188,66 @@ public class TtsPhraseCacheService {
                     }
                 }
             }
-            log.debug("[TTS缓存] 未命中 key={}，调用 CosyVoice 合成", key.substring(0, 8));
+            return synthesizeWithDedup(key, out, text, voiceId, fixedPhrase);
         }
         if (!isAvailable()) {
             return null;
         }
-        if (!aiVoiceProperties.isTtsPhraseCacheEnabled()) {
-            return fixedPhrase
-                    ? dashScopeVoiceTtsService.synthesizeFixedPhraseToFile(out, text, voiceId)
-                    : dashScopeVoiceTtsService.synthesizeToFile(out, text, voiceId);
-        }
-        String key = cacheKey(text, voiceId, fixedPhrase);
-        Path built = fixedPhrase
+        return fixedPhrase
                 ? dashScopeVoiceTtsService.synthesizeFixedPhraseToFile(out, text, voiceId)
                 : dashScopeVoiceTtsService.synthesizeToFile(out, text, voiceId);
-        if (built == null || !Files.exists(built) || fileSize(built) <= 44) {
-            return built;
-        }
+    }
+
+    private Path synthesizeWithDedup(String key, Path out, String text, String voiceId, boolean fixedPhrase) {
+        CompletableFuture<Path> future = inFlight.computeIfAbsent(key, k -> CompletableFuture.supplyAsync(
+                () -> doSynthesizeAndStore(k, text, voiceId, fixedPhrase), TTS_DEDUP_EXECUTOR));
         try {
+            Path store = future.get();
+            if (store == null || !Files.exists(store) || fileSize(store) <= 44) {
+                return null;
+            }
+            Files.copy(store, out, StandardCopyOption.REPLACE_EXISTING);
+            return out;
+        } catch (Exception e) {
+            inFlight.remove(key, future);
+            log.debug("[TTS缓存] 合成失败 key={}: {}", key.substring(0, 8), e.getMessage());
+            return null;
+        }
+    }
+
+    private Path doSynthesizeAndStore(String key, String text, String voiceId, boolean fixedPhrase) {
+        try {
+            log.debug("[TTS缓存] 未命中 key={}，调用 CosyVoice 合成", key.substring(0, 8));
+            if (!isAvailable()) {
+                return null;
+            }
             Path store = cacheDir().resolve(key + ".wav");
-            Files.createDirectories(store.getParent());
-            Files.copy(built, store, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.createDirectories(store.getParent());
+            } catch (Exception e) {
+                log.debug("[TTS缓存] 创建目录失败: {}", e.getMessage());
+                return null;
+            }
+            Path built = fixedPhrase
+                    ? dashScopeVoiceTtsService.synthesizeFixedPhraseToFile(store, text, voiceId)
+                    : dashScopeVoiceTtsService.synthesizeToFile(store, text, voiceId);
+            if (built == null || !Files.exists(built) || fileSize(built) <= 44) {
+                return null;
+            }
             synchronized (cache) {
                 cache.put(key, store);
             }
-        } catch (Exception e) {
-            log.debug("[TTS缓存] 写入失败: {}", e.getMessage());
+            return store;
+        } finally {
+            inFlight.remove(key);
         }
-        return built;
     }
+
+    private static final ExecutorService TTS_DEDUP_EXECUTOR = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "tts-phrase-dedup");
+        t.setDaemon(true);
+        return t;
+    });
 
     private Path cacheDir() {
         String dir = aiVoiceProperties.getTtsPhraseCacheDir();

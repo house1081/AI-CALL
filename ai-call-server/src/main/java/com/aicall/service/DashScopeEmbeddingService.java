@@ -26,21 +26,36 @@ public class DashScopeEmbeddingService {
     private final DashScopeApiKeyResolver dashScopeApiKeyResolver;
     private final RestTemplate llmRestTemplate;
     private final ObjectMapper objectMapper;
+    private final EmbeddingCacheService embeddingCacheService;
 
     public DashScopeEmbeddingService(DialogRagProperties dialogRagProperties,
                                      DashScopeApiKeyResolver dashScopeApiKeyResolver,
                                      @Qualifier("llmRestTemplate") RestTemplate llmRestTemplate,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     EmbeddingCacheService embeddingCacheService) {
         this.dialogRagProperties = dialogRagProperties;
         this.dashScopeApiKeyResolver = dashScopeApiKeyResolver;
         this.llmRestTemplate = llmRestTemplate;
         this.objectMapper = objectMapper;
+        this.embeddingCacheService = embeddingCacheService;
     }
 
     public float[] embed(String text) {
         if (!StringUtils.hasText(text)) {
             return new float[0];
         }
+        float[] cached = embeddingCacheService.get(text);
+        if (cached != null && cached.length > 0) {
+            return cached;
+        }
+        float[] vec = embedRemote(text);
+        if (vec.length > 0) {
+            embeddingCacheService.put(text, vec);
+        }
+        return vec;
+    }
+
+    private float[] embedRemote(String text) {
         String apiKey = dashScopeApiKeyResolver.resolve();
         if (!StringUtils.hasText(apiKey)) {
             log.warn("[RAG嵌入] 未配置 DashScope API Key，跳过嵌入");

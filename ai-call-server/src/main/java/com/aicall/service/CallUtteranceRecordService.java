@@ -71,8 +71,17 @@ public class CallUtteranceRecordService {
      */
     public Path recordUntilSilence(String uuid) throws Exception {
         if (callSessionRecordService.isSessionRecording(uuid)) {
-            return recordUntilSilenceFromSession(uuid);
+            try {
+                return recordUntilSilenceFromSession(uuid);
+            } catch (NoSpeechDetectedException e) {
+                log.warn("[录音] 全程录音 VAD 未检出客户语音，回退独立录音 uuid={}", uuid);
+                return recordUntilSilenceDirect(uuid);
+            }
         }
+        return recordUntilSilenceDirect(uuid);
+    }
+
+    private Path recordUntilSilenceDirect(String uuid) throws Exception {
         RecordPaths paths = newRecordPaths(uuid);
         int maxMs = Math.max(3000, aiVoiceProperties.getAsrRecordMaxMs());
         int limitSec = Math.max(3, (maxMs + 999) / 1000);

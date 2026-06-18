@@ -12,6 +12,7 @@ import org.springframework.util.StringUtils;
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * originate 成功后轮询 FS 通道是否接通，自动建会话并播报开场白（无需 FS 调 call-start）。
@@ -41,12 +42,7 @@ public class OutboundAnswerVoiceService {
         return t;
     });
 
-    /** 独立线程池，避免监听线程与对话循环争抢/耗尽 CachedThreadPool */
-    private final ExecutorService dialogExecutor = Executors.newFixedThreadPool(8, r -> {
-        Thread t = new Thread(r, "dialog-loop");
-        t.setDaemon(true);
-        return t;
-    });
+    private final AtomicInteger dialogThreadSeq = new AtomicInteger();
 
     public void scheduleAfterOriginate(String fsUuid, FreeSwitchDialService.DialRequest req) {
         if (!aiVoiceProperties.isEnabled()
@@ -151,15 +147,7 @@ public class OutboundAnswerVoiceService {
                         fsUuid, record.getId(), aiVoiceProperties.isDialogEnabled());
                 if (aiVoiceProperties.isDialogEnabled()) {
                     Integer recordId = record.getId();
-                    log.info("[对话] 提交后台循环 uuid={} recordId={}", fsUuid, recordId);
-                    dialogExecutor.submit(() -> {
-                        try {
-                            outboundDialogLoopService.run(fsUuid, recordId);
-                        } catch (Exception ex) {
-                            log.warn("[对话] 后台循环异常 uuid={} recordId={}: {}",
-                                    fsUuid, recordId, ex.getMessage(), ex);
-                        }
-                    });
+                    startDialogLoop(fsUuid, recordId);
                 }
             } catch (Exception e) {
                 log.warn("接通自动播报失败 uuid={}: {}", fsUuid, e.getMessage());
@@ -172,6 +160,23 @@ public class OutboundAnswerVoiceService {
         if (!isAlreadyHandled(fsUuid)) {
             handleNoAnswer(fsUuid, req, "监听超时未摘机");
         }
+    }
+
+    /** 每通电话独立线程，避免固定线程池被长通话占满导致新通话无法进入对话环 */
+    private void startDialogLoop(String fsUuid, Integer recordId) {
+        log.info("[对话] 提交后台循环 uuid={} recordId={}", fsUuid, recordId);
+        String suffix = fsUuid.length() > 8 ? fsUuid.substring(0, 8) : fsUuid;
+        Thread t = new Thread(() -> {
+            log.info("[对话] 后台线程已启动 uuid={} recordId={}", fsUuid, recordId);
+            try {
+                outboundDialogLoopService.run(fsUuid, recordId);
+            } catch (Exception ex) {
+                log.warn("[对话] 后台循环异常 uuid={} recordId={}: {}",
+                        fsUuid, recordId, ex.getMessage(), ex);
+            }
+        }, "dialog-loop-" + dialogThreadSeq.incrementAndGet() + "-" + suffix);
+        t.setDaemon(true);
+        t.start();
     }
 
     private int resolveMaxRingCount(FreeSwitchDialService.DialRequest req) {

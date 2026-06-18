@@ -169,6 +169,8 @@ public class AiVoiceProperties {
     private int streamTtsFirstChunkChars = 14;
     /** 独立线程池调用大模型最长等待（秒） */
     private int dialogLlmTimeoutSec = 55;
+    /** 外呼对话 LLM 线程池大小 */
+    private int dialogLlmPoolSize = 6;
     /** 分段模式：客户长时间无有效 ASR 时主动 gentle 询问 */
     private boolean dialogSilenceProbeEnabled = true;
     private int dialogSilenceProbeMs = 6000;
@@ -211,6 +213,11 @@ public class AiVoiceProperties {
     private boolean asrStreamEnabled = false;
     /** 启动时少打日志、不生成测试蜂鸣 */
     private boolean startupQuiet = true;
+    /** AI实时模式下：TTS失败/答非所问时自动切入预录熔断 */
+    private boolean prerecordCircuitEnabled = true;
+    /** 预录应答片段间随机停顿（毫秒） */
+    private int prerecordPauseMinMs = 500;
+    private int prerecordPauseMaxMs = 1200;
 
     /** 全局默认句末档位：stable=稳健 | fast=极速（任务/DB 可覆盖） */
     private String silenceProfile = "stable";

@@ -4,6 +4,7 @@ import com.aicall.common.BizException;
 import com.aicall.common.CosyVoiceModelRules;
 import com.aicall.common.CosyVoiceSystemVoiceCatalog;
 import com.aicall.common.CosyVoiceVoiceMode;
+import com.aicall.common.OutboundDialogMode;
 import com.aicall.common.SilenceProfile;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.dto.CosyVoiceSystemVoiceOptionDto;
@@ -38,6 +39,8 @@ public class VoiceRuntimeSettingsService {
     private final DashScopeApiKeyResolver dashScopeApiKeyResolver;
     private final ObjectProvider<OpeningVoiceCacheService> openingVoiceCacheProvider;
     private final ObjectProvider<EndingVoiceCacheService> endingVoiceCacheProvider;
+
+    private volatile VoiceRuntimeConfig cachedRow;
 
     private final ConcurrentHashMap<String, SilenceProfile.Params> callSilenceProfiles = new ConcurrentHashMap<>();
 
@@ -163,6 +166,18 @@ public class VoiceRuntimeSettingsService {
         return aiVoiceProperties.isPlayOpeningOnAnswer();
     }
 
+    public String getOutboundDialogMode() {
+        VoiceRuntimeConfig row = loadRow();
+        if (row != null && StringUtils.hasText(row.getOutboundDialogMode())) {
+            return OutboundDialogMode.normalize(row.getOutboundDialogMode());
+        }
+        return OutboundDialogMode.AI_REALTIME;
+    }
+
+    public boolean isSmartPrerecordMode() {
+        return OutboundDialogMode.isSmartPrerecord(getOutboundDialogMode());
+    }
+
     public void logEffectiveVoiceProfile(String context) {
         logEffectiveVoiceProfile(context, null);
     }
@@ -192,6 +207,8 @@ public class VoiceRuntimeSettingsService {
                         ? aiVoiceProperties.getTtsCloneVoiceId().trim()
                         : "");
         dto.setPlayOpeningOnAnswer(isPlayOpeningOnAnswer());
+        dto.setOutboundDialogMode(getOutboundDialogMode());
+        dto.setOutboundDialogModeLabel(isSmartPrerecordMode() ? "智能预录外呼" : "AI实时对话");
         dto.setDashScopeConfigured(isDashScopeConfigured());
         dto.setCosyvoiceTtsModel(getEffectiveTtsModel());
         dto.setUserSilenceBeforeResponseMs(aiVoiceProperties.getUserSilenceBeforeResponseMs());
@@ -239,6 +256,7 @@ public class VoiceRuntimeSettingsService {
                 ? Boolean.TRUE.equals(req.getPlayOpeningOnAnswer())
                 : isPlayOpeningOnAnswer();
         int playOpeningFlag = playOpening ? 1 : 0;
+        String outboundMode = OutboundDialogMode.normalize(req.getOutboundDialogMode());
 
         VoiceRuntimeConfig row = loadRow();
         String oldEffectiveVoice = getEffectiveTtsVoice();
@@ -252,6 +270,7 @@ public class VoiceRuntimeSettingsService {
             row.setTtsVoiceMode(voiceMode);
             row.setCosyvoiceSystemVoice(systemVoice);
             row.setPlayOpeningOnAnswer(playOpeningFlag);
+            row.setOutboundDialogMode(outboundMode);
             row.setUpdateTime(LocalDateTime.now());
             voiceRuntimeConfigMapper.insert(row);
         } else {
@@ -260,21 +279,29 @@ public class VoiceRuntimeSettingsService {
             row.setTtsVoiceMode(voiceMode);
             row.setCosyvoiceSystemVoice(systemVoice);
             row.setPlayOpeningOnAnswer(playOpeningFlag);
+            row.setOutboundDialogMode(outboundMode);
             row.setUpdateTime(LocalDateTime.now());
             voiceRuntimeConfigMapper.updateById(row);
         }
-        log.info("[语音配置] 已保存（下一通外呼生效，无需重启）silenceProfile={} voiceMode={} cloneVoice={} systemVoice={} playOpening={}",
-                silenceProfile, voiceMode, maskVoiceId(cosyVoice), systemVoice, playOpeningFlag);
+        log.info("[语音配置] 已保存（下一通外呼生效，无需重启）silenceProfile={} voiceMode={} outboundMode={} cloneVoice={} systemVoice={} playOpening={}",
+                silenceProfile, voiceMode, outboundMode, maskVoiceId(cosyVoice), systemVoice, playOpeningFlag);
 
         String newEffectiveVoice = getEffectiveTtsVoice();
         String newEffectiveModel = getEffectiveTtsModel();
         if (!newEffectiveVoice.equals(oldEffectiveVoice) || !newEffectiveModel.equals(oldEffectiveModel)) {
             log.info("[语音配置] CosyVoice 音色已变更，请在「固定话术预生成」手动同步（避免自动预合成触发 428）");
         }
+        cachedRow = voiceRuntimeConfigMapper.selectById(CONFIG_ID);
     }
 
     private VoiceRuntimeConfig loadRow() {
-        return voiceRuntimeConfigMapper.selectById(CONFIG_ID);
+        VoiceRuntimeConfig row = cachedRow;
+        if (row != null) {
+            return row;
+        }
+        row = voiceRuntimeConfigMapper.selectById(CONFIG_ID);
+        cachedRow = row;
+        return row;
     }
 
     private boolean isDashScopeConfigured() {
