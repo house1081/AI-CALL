@@ -176,11 +176,12 @@ public class AiVoiceProperties {
     private int dialogSilenceProbeMs = 6000;
     private int dialogSilenceProbeMinMs = 5000;
     private int dialogSilenceProbeMaxMs = 8000;
-    private int dialogSilenceProbeMax = 3;
+    private int dialogSilenceProbeMax = 5;
     /** 话术保存时预合成开场白 wav，接通后拷贝即播 */
     private boolean openingVoicePrecacheEnabled = true;
     /** 服务启动时是否自动预合成（建议关，避免启动即触发 428） */
-    private boolean openingVoicePrecacheOnStartup = false;
+    /** 启动时检查开场白/结束语预录是否就绪（不自动合成） */
+    private boolean openingVoicePrecacheOnStartup = true;
     /** 预合成开场白本地目录 */
     private String openingVoiceCacheDir = "./uploads/tts/opening";
     /** 预合成结束语本地目录 */
@@ -218,6 +219,10 @@ public class AiVoiceProperties {
     /** 预录应答片段间随机停顿（毫秒） */
     private int prerecordPauseMinMs = 500;
     private int prerecordPauseMaxMs = 1200;
+    /** 智能预录：下发 FS 播放后不阻塞等待播完（后台监听插嘴/基线同步） */
+    private boolean prerecordPlaybackAsync = true;
+    /** FAQ wav 路径内存缓存上限 */
+    private int kbWavCacheMaxEntries = 4096;
 
     /** 全局默认句末档位：stable=稳健 | fast=极速（任务/DB 可覆盖） */
     private String silenceProfile = "stable";

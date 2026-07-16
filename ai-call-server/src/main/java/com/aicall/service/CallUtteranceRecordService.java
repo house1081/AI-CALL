@@ -31,6 +31,7 @@ public class CallUtteranceRecordService {
     private final CallSessionRecordService callSessionRecordService;
     private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
     private final VoicePlaybackService voicePlaybackService;
+    private final DialogTurnRegistry dialogTurnRegistry;
 
     public record RecordPaths(String fsPath, Path localPath) {
     }
@@ -86,8 +87,8 @@ public class CallUtteranceRecordService {
         int maxMs = Math.max(3000, aiVoiceProperties.getAsrRecordMaxMs());
         int limitSec = Math.max(3, (maxMs + 999) / 1000);
         int silenceMs = voiceRuntimeSettingsService.resolveAsrVadSilenceMs(uuid);
-        int minSpeechMs = Math.max(200, aiVoiceProperties.getAsrVadMinSpeechMs());
-        int pollMs = Math.max(50, aiVoiceProperties.getAsrVadPollMs());
+        int minSpeechMs = Math.max(80, aiVoiceProperties.getAsrVadMinSpeechMs());
+        int pollMs = Math.max(10, aiVoiceProperties.getAsrVadPollMs());
         int energy = aiVoiceProperties.getAsrVadEnergyThreshold();
 
         prepareRecordChannel(uuid);
@@ -115,6 +116,7 @@ public class CallUtteranceRecordService {
                 if (speechSeen && TelephonyVadUtil.isUtteranceComplete(
                         samples, TelephonyWavUtil.TELEPHONY_RATE, silenceMs, minSpeechMs, energy)) {
                     log.info("[ASR-VAD] 客户已说完（句末静音约{}ms）uuid={}", silenceMs, uuid);
+                    dialogTurnRegistry.markUserUtteranceEnded(uuid, silenceMs);
                     break;
                 }
             } catch (Exception e) {
@@ -129,7 +131,7 @@ public class CallUtteranceRecordService {
         eslService.api("uuid_break " + uuid + " all");
         reparkChannel(uuid);
         stopUuidRecord(uuid, paths.fsPath());
-        waitForRecordFile(paths.localPath(), paths.fsPath(), 2500);
+        waitForRecordFile(paths.localPath(), paths.fsPath(), 900);
         return finishRecord(uuid, paths);
     }
 
@@ -141,13 +143,13 @@ public class CallUtteranceRecordService {
         long mark = callSessionRecordService.getAsrReadOffset(uuid);
         int maxMs = Math.max(2000, aiVoiceProperties.getAsrRecordMaxMs());
         int silenceMs = voiceRuntimeSettingsService.resolveAsrVadSilenceMs(uuid);
-        int minSpeechMs = Math.max(200, aiVoiceProperties.getAsrVadMinSpeechMs());
-        int pollMs = Math.max(35, aiVoiceProperties.getAsrVadPollMs());
+        int minSpeechMs = Math.max(80, aiVoiceProperties.getAsrVadMinSpeechMs());
+        int pollMs = Math.max(10, aiVoiceProperties.getAsrVadPollMs());
         int energy = aiVoiceProperties.getAsrVadEnergyThreshold();
 
         long start = System.currentTimeMillis();
         boolean speechSeen = false;
-        int noSpeechGiveUpMs = Math.min(2600, Math.max(1500, maxMs / 3));
+        int noSpeechGiveUpMs = Math.min(4000, Math.max(2000, maxMs / 3));
         while (System.currentTimeMillis() - start < maxMs) {
             if (!eslService.uuidExists(uuid)) {
                 break;
@@ -172,6 +174,7 @@ public class CallUtteranceRecordService {
                 if (speechSeen && TelephonyVadUtil.isUtteranceComplete(
                         samples, TelephonyWavUtil.TELEPHONY_RATE, silenceMs, minSpeechMs, energy)) {
                     log.info("[ASR-VAD] 客户已说完（全程录音）uuid={} silenceMs={}", uuid, silenceMs);
+                    dialogTurnRegistry.markUserUtteranceEnded(uuid, silenceMs);
                     break;
                 }
             } catch (NoSpeechDetectedException e) {
@@ -193,21 +196,23 @@ public class CallUtteranceRecordService {
 
     /** 仅读取 mark 之后新增 PCM（VAD 用），最多取尾部若干秒避免把历史 TTS 算进静音检测 */
     private short[] readSessionPcmSinceMark(Path session, long mark) throws java.io.IOException {
-        byte[] raw = Files.readAllBytes(session);
-        if (raw.length < 44) {
+        long size = Files.size(session);
+        if (size < 44) {
             return new short[0];
         }
-        int dataStart = findWavDataOffset(raw);
-        int from = (int) Math.max(dataStart, mark);
-        int to = raw.length;
-        if (to - from < 320) {
+        int maxVadBytes = TelephonyWavUtil.TELEPHONY_RATE * 2 * 10;
+        long readFrom = Math.max(44, mark);
+        if (size - readFrom > maxVadBytes) {
+            readFrom = size - maxVadBytes;
+        }
+        if (size - readFrom < 320) {
             return new short[0];
         }
-        int maxVadPcm = TelephonyWavUtil.TELEPHONY_RATE * 2 * 10;
-        if (to - from > maxVadPcm) {
-            from = to - maxVadPcm;
+        byte[] pcm = new byte[(int) (size - readFrom)];
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(session.toFile(), "r")) {
+            raf.seek(readFrom);
+            raf.readFully(pcm);
         }
-        byte[] pcm = java.util.Arrays.copyOfRange(raw, from, to);
         java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(pcm).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         short[] out = new short[pcm.length / 2];
         for (int i = 0; i < out.length; i++) {

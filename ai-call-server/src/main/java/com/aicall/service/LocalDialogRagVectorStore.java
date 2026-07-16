@@ -16,30 +16,34 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class LocalDialogRagVectorStore implements DialogRagVectorStore {
 
-    private final ConcurrentHashMap<Integer, Entry> index = new ConcurrentHashMap<>();
+    private volatile ConcurrentHashMap<Integer, Entry> indexRef = new ConcurrentHashMap<>();
 
     @Override
     public void upsert(int qaId, int kbId, String question, String standardAnswer, float[] embedding,
                        int dataType, double weight) {
         if (embedding == null || embedding.length == 0) {
-            index.remove(qaId);
+            indexRef.remove(qaId);
             return;
         }
-        index.put(qaId, new Entry(qaId, kbId, question, standardAnswer, embedding, dataType, weight));
+        indexRef.put(qaId, new Entry(qaId, kbId, question, standardAnswer, embedding, dataType, weight));
     }
 
     @Override
     public void remove(int qaId) {
-        index.remove(qaId);
+        indexRef.remove(qaId);
     }
 
     @Override
     public List<DialogRagHitDto> search(float[] queryEmbedding, int kbId, int topK) {
-        if (queryEmbedding == null || queryEmbedding.length == 0 || index.isEmpty()) {
+        if (queryEmbedding == null || queryEmbedding.length == 0) {
+            return List.of();
+        }
+        ConcurrentHashMap<Integer, Entry> snapshot = indexRef;
+        if (snapshot.isEmpty()) {
             return List.of();
         }
         List<DialogRagHitDto> scored = new ArrayList<>();
-        for (Entry e : index.values()) {
+        for (Entry e : snapshot.values()) {
             if (e.kbId != kbId) {
                 continue;
             }
@@ -66,13 +70,13 @@ public class LocalDialogRagVectorStore implements DialogRagVectorStore {
 
     @Override
     public int size() {
-        return index.size();
+        return indexRef.size();
     }
 
     @Override
     public int sizeByKb(int kbId) {
         int n = 0;
-        for (Entry e : index.values()) {
+        for (Entry e : indexRef.values()) {
             if (e.kbId == kbId) {
                 n++;
             }
@@ -82,7 +86,7 @@ public class LocalDialogRagVectorStore implements DialogRagVectorStore {
 
     @Override
     public void clear() {
-        index.clear();
+        indexRef = new ConcurrentHashMap<>();
     }
 
     private record Entry(int qaId, int kbId, String question, String standardAnswer,

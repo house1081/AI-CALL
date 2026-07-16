@@ -39,4 +39,14 @@ public class DialogRagProperties {
     private boolean loanMainFlowEnabled = true;
     /** 库为空时启动自动导入 classpath 话术包 */
     private boolean loanPackAutoImport = true;
+    /** 启动时从话术包同步 FAQ 兜底（按 fallback 编号 upsert，不覆盖已有录音） */
+    private boolean loanPackSyncFallbacksOnStartup = true;
+    /** 智能预录：向量索引拼接关键词与答案摘要，提升语义命中 */
+    private boolean enrichIndexWithKeywords = true;
+    /** 智能预录：检索扩展 top-k（多候选换录音） */
+    private int prerecordRetrieveTopK = 8;
+    /** 智能预录：高置信 FAQ 直出阈值（原硬编码 1.85） */
+    private double highConfidenceFaqScore = 1.85;
+    /** 有可播录音时放宽的最低向量分 */
+    private double playableMinScore = 0.52;
 }

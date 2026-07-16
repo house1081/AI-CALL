@@ -71,9 +71,9 @@ public class CallDialogPersistService {
         }
     }
 
-    /** 通话结束时将内存缓冲写入 DB */
+    /** 通话结束时将内存缓冲写入 DB（训练 sim 负 ID 不落库） */
     public void flushToDb(Integer callRecordId) {
-        if (callRecordId == null) {
+        if (callRecordId == null || callRecordId < 0) {
             return;
         }
         StringBuilder sb = liveBuffers.get(callRecordId);

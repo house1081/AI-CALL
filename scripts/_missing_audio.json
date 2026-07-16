@@ -1,0 +1,157 @@
+[
+  {
+    "id": 346,
+    "question": "138.非目标客群",
+    "remark": "fallback:138"
+  },
+  {
+    "id": 345,
+    "question": "137.需要个贷产品",
+    "remark": "fallback:137"
+  },
+  {
+    "id": 327,
+    "question": "119.放款需要还款吗",
+    "remark": "fallback:119"
+  },
+  {
+    "id": 312,
+    "question": "104.委婉拒绝|考虑一下再说",
+    "remark": "fallback:104"
+  },
+  {
+    "id": 306,
+    "question": "98.无房产证",
+    "remark": "fallback:98"
+  },
+  {
+    "id": 291,
+    "question": "83.初次拒绝挽留",
+    "remark": "fallback:83"
+  },
+  {
+    "id": 283,
+    "question": "75.日常忙碌没时间",
+    "remark": "fallback:75"
+  },
+  {
+    "id": 277,
+    "question": "69.担心影响后续房贷",
+    "remark": "fallback:69"
+  },
+  {
+    "id": 275,
+    "question": "67.公司经营年限",
+    "remark": "fallback:67"
+  },
+  {
+    "id": 273,
+    "question": "65.客户经理称呼",
+    "remark": "fallback:65"
+  },
+  {
+    "id": 271,
+    "question": "63.非银行来电疑问",
+    "remark": "fallback:63"
+  },
+  {
+    "id": 270,
+    "question": "62.异常通话杂音",
+    "remark": "fallback:62"
+  },
+  {
+    "id": 263,
+    "question": "55.要求先发产品资料",
+    "remark": "fallback:55"
+  },
+  {
+    "id": 259,
+    "question": "51.距离远|上班没空",
+    "remark": "fallback:51"
+  },
+  {
+    "id": 251,
+    "question": "43.商业贷|公积金贷区别",
+    "remark": "fallback:43"
+  },
+  {
+    "id": 238,
+    "question": "30.补充资料",
+    "remark": "fallback:30"
+  },
+  {
+    "id": 234,
+    "question": "26.公司位置发定位",
+    "remark": "fallback:26"
+  },
+  {
+    "id": 227,
+    "question": "19.听不清|重复一遍",
+    "remark": "fallback:19"
+  },
+  {
+    "id": 222,
+    "question": "14.公司优势",
+    "remark": "fallback:14"
+  },
+  {
+    "id": 217,
+    "question": "9.别家费用更低|别的公司便宜",
+    "remark": "fallback:9"
+  },
+  {
+    "id": 213,
+    "question": "5.不开票",
+    "remark": "fallback:5"
+  },
+  {
+    "id": 212,
+    "question": "4.上门服务",
+    "remark": "fallback:4"
+  },
+  {
+    "id": 208,
+    "question": "[主线AA]客户追问产品明细转接",
+    "remark": "flow:AA"
+  },
+  {
+    "id": 203,
+    "question": "[主线26]加微失败结束语",
+    "remark": "flow:26"
+  },
+  {
+    "id": 202,
+    "question": "[主线25]意向不明加微",
+    "remark": "flow:25"
+  },
+  {
+    "id": 192,
+    "question": "[主线14]人寿保单",
+    "remark": "flow:14"
+  },
+  {
+    "id": 188,
+    "question": "[主线10]年度纳税额",
+    "remark": "flow:10"
+  },
+  {
+    "id": 187,
+    "question": "[主线09]年开票金额",
+    "remark": "flow:09"
+  },
+  {
+    "id": 185,
+    "question": "[主线07]月收入问询",
+    "remark": "flow:07"
+  },
+  {
+    "id": 184,
+    "question": "[主线06]公积金缴存时长",
+    "remark": "flow:06"
+  },
+  {
+    "id": 179,
+    "question": "[主线01]开场白",
+    "remark": "flow:01"
+  }
+]

@@ -92,7 +92,7 @@ public class PrerecordOutboundService {
     private PrerecordTurnResultDto playRefuseAndEnd(String fsUuid, Integer callRecordId,
                                                     PrerecordTurnResultDto result) {
         try {
-            String reply = "好的，理解您的想法，那就不多打扰了，祝您生活愉快。";
+            String reply = ForcedHangupRules.REFUSE_END_WORDS;
             DialogTranscriptLog.aiReply(callRecordId, fsUuid, reply, "prerecord-refuse", true);
             prerecordPlaybackService.playRefuseEnding(fsUuid);
             result.setHandled(true);

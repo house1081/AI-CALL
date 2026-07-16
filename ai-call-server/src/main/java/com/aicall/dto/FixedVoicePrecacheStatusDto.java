@@ -29,4 +29,9 @@ public class FixedVoicePrecacheStatusDto {
     private Integer openingReadyCount;
     /** 结束语已就绪的音色数 */
     private Integer endingReadyCount;
+
+    /** 智能预录：是否使用上传录音模式 */
+    private Boolean uploadMode;
+    private String openingAudioUrl;
+    private String endingAudioUrl;
 }

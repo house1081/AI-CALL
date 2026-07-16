@@ -40,6 +40,8 @@ public class OpeningVoiceCacheService {
     private final TtsPhraseCacheService ttsPhraseCacheService;
     private final DashScopeVoiceTtsService dashScopeVoiceTtsService;
     private final AiPromptMapper aiPromptMapper;
+    private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
+    private final AiPromptRecordingService aiPromptRecordingService;
     private final FixedPhraseVoiceCatalogService voiceCatalog;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
@@ -49,7 +51,7 @@ public class OpeningVoiceCacheService {
     });
 
     @EventListener(ApplicationReadyEvent.class)
-    void warmOnApplicationReady() {
+    void checkOpeningCacheOnStartup() {
         if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()
                 || !aiVoiceProperties.isOpeningVoicePrecacheOnStartup()) {
             return;
@@ -60,18 +62,47 @@ public class OpeningVoiceCacheService {
                 if (delay > 0) {
                     Thread.sleep(delay);
                 }
-                if (isReady()) {
-                    log.info("[开场白缓存] 当前音色已有预合成 wav voice={}", maskVoice(voiceCatalog.resolveActiveVoiceId()));
-                    return;
-                }
-                log.warn("[开场白缓存] 无有效预录音，启动全音色预合成");
-                ensureActiveOpeningCached(true);
+                logStartupCheck();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                log.warn("[开场白缓存] 启动预热失败: {}", e.getMessage());
+                log.warn("[开场白缓存] 启动检查失败: {}", e.getMessage());
             }
         });
+    }
+
+    private void logStartupCheck() {
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            AiPrompt active = aiPromptMapper.selectOne(
+                    new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
+            boolean opening = aiPromptRecordingService.hasOpeningRecording(active);
+            boolean ending = aiPromptRecordingService.hasEndingRecording(active);
+            if (opening && ending) {
+                log.info("[开场白缓存] 启动检查：智能预录上传录音已就绪（开场白+结束语）");
+            } else if (opening) {
+                log.warn("[开场白缓存] 启动检查：智能预录已上传开场白，缺少结束语录音");
+            } else if (ending) {
+                log.warn("[开场白缓存] 启动检查：智能预录已上传结束语，缺少开场白录音");
+            } else {
+                log.warn("[开场白缓存] 启动检查：智能预录未上传开场白/结束语录音，请在管理端上传");
+            }
+            return;
+        }
+        AiPrompt active = loadActivePrompt();
+        if (active == null || !StringUtils.hasText(active.getOpeningRemarks())) {
+            log.info("[开场白缓存] 启动检查：未配置使用中模板或开场白为空");
+            return;
+        }
+        String voiceId = voiceCatalog.resolveActiveVoiceId();
+        int ready = countReadyVoices();
+        int total = voiceCatalog.listAllVoiceIds().size();
+        if (isReady()) {
+            log.info("[开场白缓存] 启动检查：已就绪 voice={} {}/{} 音色",
+                    maskVoice(voiceId), ready, total);
+        } else {
+            log.warn("[开场白缓存] 启动检查：未就绪 voice={} {}/{} 音色，请在管理端手动预生成（启动不自动合成）",
+                    maskVoice(voiceId), ready, total);
+        }
     }
 
     public void regenerateAsync(Integer promptId) {
@@ -230,8 +261,7 @@ public class OpeningVoiceCacheService {
         String voiceId = voiceCatalog.resolveActiveVoiceId();
         Path src = resolveSourceWav(voiceId);
         if (src == null) {
-            log.warn("[开场白缓存] 当前音色无预录音 voice={}", maskVoice(voiceId));
-            regenerateAsync(null);
+            log.warn("[开场白缓存] 当前音色无预录音 voice={}，请在管理端预生成", maskVoice(voiceId));
             return null;
         }
         try {

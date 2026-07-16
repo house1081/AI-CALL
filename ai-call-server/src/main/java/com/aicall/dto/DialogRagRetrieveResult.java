@@ -18,6 +18,8 @@ public class DialogRagRetrieveResult {
     private boolean noMatchFallback;
     /** 关键词规则命中（话术包兜底库） */
     private boolean keywordMatched;
+    /** 关键词规则 id（dialog_training_qa.id） */
+    private Integer keywordRuleId;
     private long retrieveMs;
 
     public DialogRagHitDto bestPositive() {

@@ -25,6 +25,7 @@ public class CallHangupService {
     private final ForcedHangupService forcedHangupService;
     private final FreeSwitchProperties freeSwitchProperties;
     private final FreeSwitchDialService freeSwitchDialService;
+    private final TtsFailureRecoveryService ttsFailureRecoveryService;
 
     public HangupDecision tick(Integer callRecordId) {
         return forcedHangupService.checkDurationOnly(callRecordId, null);
@@ -67,7 +68,12 @@ public class CallHangupService {
         data.put("fsUuid", fsUuid);
         data.put("eslEndpoint", freeSwitchProperties.eslEndpoint());
         if (StringUtils.hasText(fsUuid)) {
-            freeSwitchDialService.hangup(fsUuid);
+            if (duration > 0) {
+                ttsFailureRecoveryService.playEndingThenHangup(
+                        fsUuid, req.getCallRecordId(), ForcedHangupRules.END_WORDS, hangupType);
+            } else {
+                freeSwitchDialService.hangup(fsUuid);
+            }
             data.put("eslCommand", "uuid_kill " + fsUuid);
         }
         log.info("强制挂断 callRecordId={} type={} duration={}s", req.getCallRecordId(), hangupType, duration);

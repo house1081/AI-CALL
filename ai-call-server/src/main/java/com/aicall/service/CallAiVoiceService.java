@@ -63,6 +63,7 @@ public class CallAiVoiceService {
     private final DialogTurnRegistry dialogTurnRegistry;
     private final TtsProsodyService ttsProsodyService;
     private final DialogReplyAudioCacheService dialogReplyAudioCacheService;
+    private final RecordingOnlyPlaybackService recordingOnlyPlaybackService;
     private final com.aicall.service.prerecord.PrerecordCircuitService prerecordCircuitService;
 
     public void onCallAnswered(String fsUuid, Integer callRecordId) {
@@ -84,6 +85,13 @@ public class CallAiVoiceService {
     }
 
     public AiChatResponse voiceTurn(AiChatRequest req) {
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            log.warn("[LLM/TTS] 智能预录模式禁止调用 voiceTurn uuid={}", req.getFsUuid());
+            AiChatResponse blocked = new AiChatResponse();
+            blocked.setReply("");
+            blocked.setModel("smart-prerecord-blocked");
+            return blocked;
+        }
         try {
             // 外呼通话：始终带超时走独立线程池，避免 dialog-loop 被 LLM 长时间阻塞导致「说完就卡住」
             if (req.getCallRecordId() != null || aiVoiceProperties.isDialogLlmAsync()) {
@@ -210,7 +218,6 @@ public class CallAiVoiceService {
 
     private Optional<AiChatResponse> tryReplyAudioCache(AiChatRequest req, long turnStart) {
         if (!dialogReplyAudioCacheService.isEnabled()
-                || aiVoiceProperties.isDialogLlmStreamTts()
                 || !StringUtils.hasText(req.getUserText())) {
             return Optional.empty();
         }
@@ -260,19 +267,24 @@ public class CallAiVoiceService {
                 r.getModel(), false);
         if (aiVoiceProperties.isEnabled() && StringUtils.hasText(req.getFsUuid())
                 && shouldPlayOnChannel(req.getFsUuid())) {
-            boolean ok = voicePlaybackService.playSynthesizedWav(req.getFsUuid(), hit.wavPath());
-            if (!ok) {
-                log.info("[问答缓存] wav 播放失败，回退实时 TTS 合成 uuid={}", req.getFsUuid());
-                playText(req.getFsUuid(), hit.replyText());
-            } else {
+            try {
+                boolean ok = recordingOnlyPlaybackService.playExistingWavPath(
+                        req.getFsUuid(), hit.wavPath(), hit.replyText());
+                if (!ok) {
+                    log.info("[问答缓存] wav 播放失败，回退实时 TTS 合成 uuid={}", req.getFsUuid());
+                    playText(req.getFsUuid(), hit.replyText());
+                }
+            } catch (Exception e) {
+                log.warn("[问答缓存] 播放异常 uuid={}: {}", req.getFsUuid(), e.getMessage());
                 try {
-                    voicePlaybackService.waitPlaybackFinished(req.getFsUuid(), hit.replyText(), null);
-                } catch (Exception e) {
-                    log.debug("[问答缓存] 等待播完 uuid={}: {}", req.getFsUuid(), e.getMessage());
+                    playText(req.getFsUuid(), hit.replyText());
+                } catch (Exception ex) {
+                    log.warn("[问答缓存] 回退 TTS 也失败 uuid={}: {}", req.getFsUuid(), ex.getMessage());
                 }
             }
             r.setPlaybackWaitHandled(true);
-            log.info("[问答缓存] 已播报 uuid={} 距回合开始{}ms", req.getFsUuid(),
+            log.info("[问答缓存] 已播报 uuid={} async={} 距回合开始{}ms",
+                    req.getFsUuid(), recordingOnlyPlaybackService.isOutboundPlaybackAsync(),
                     System.currentTimeMillis() - turnStart);
         }
         return r;
@@ -427,6 +439,11 @@ public class CallAiVoiceService {
 
     public void playText(String fsUuid, String text) {
         if (!StringUtils.hasText(fsUuid) || !StringUtils.hasText(text)) {
+            return;
+        }
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            log.warn("[TTS] 智能预录模式禁止 CosyVoice 合成 uuid={} text={}",
+                    fsUuid, text.length() > 40 ? text.substring(0, 40) + "…" : text);
             return;
         }
         if (!freeSwitchProperties.isEnabled()) {

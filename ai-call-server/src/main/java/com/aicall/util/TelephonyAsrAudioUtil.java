@@ -39,6 +39,15 @@ public class TelephonyAsrAudioUtil {
         if (gain > 1.001) {
             amplifyPcmInWav(wavFile, gain);
         }
+        try {
+            byte[] afterGain = Files.readAllBytes(wavFile);
+            byte[] boosted = TelephonyWavUtil.normalizeWavPeak(afterGain, 0.92);
+            if (boosted != afterGain) {
+                Files.write(wavFile, boosted);
+            }
+        } catch (Exception e) {
+            log.debug("ASR 峰值归一化跳过: {}", e.getMessage());
+        }
         log.debug("ASR 音频已规范为 8kHz/mono/16bit PCM wav: {}", wavFile.getFileName());
         return wavFile;
     }

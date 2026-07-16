@@ -33,7 +33,8 @@ public class WebConfig implements WebMvcConfigurer {
                         "/api/admin/login",
                         "/api/tenant/login",
                         "/api/callback/**",
-                        "/api/ai/**"
+                        "/api/ai/**",
+                        "/api/public/voice-training/**"
                 );
         registry.addInterceptor(callbackSecretInterceptor)
                 .addPathPatterns("/api/callback/**");

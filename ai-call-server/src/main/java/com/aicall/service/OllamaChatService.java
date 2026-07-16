@@ -2,6 +2,7 @@ package com.aicall.service;
 
 import com.aicall.common.BizException;
 import com.aicall.common.DialogSlotHelper;
+import com.aicall.common.DialogTrainingIntentRouter;
 import com.aicall.common.ForcedHangupRules;
 import com.aicall.common.HangupType;
 import com.aicall.config.AiVoiceProperties;
@@ -197,12 +198,27 @@ public class OllamaChatService {
 
         if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
                 && DialogSlotHelper.shouldPreferMainFlowAdvance(req.getUserText())) {
-            String mainLine = dialogMainFlowService.nextMainLineAfterUser(req.getCallRecordId(), req.getUserText());
+            String mainLine = dialogMainFlowService.nextMainLineAfterUser(
+                    req.getCallRecordId(), req.getUserText(), lastAi);
             if (StringUtils.hasText(mainLine)) {
                 log.info("[主线] 快答 recordId={} kb={} step={} user={}",
                         req.getCallRecordId(), kbId, dialogMainFlowService.currentStep(req.getCallRecordId()),
                         req.getUserText().length() > 16 ? req.getUserText().substring(0, 16) + "…" : req.getUserText());
                 return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
+            }
+        }
+
+        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)) {
+            String step = dialogMainFlowService.currentStep(req.getCallRecordId());
+            if (DialogTrainingIntentRouter.shouldDeferKeywordFaqToMainFlow(req.getUserText(), lastAi, step)) {
+                String mainLine = dialogMainFlowService.nextMainLineAfterUser(
+                        req.getCallRecordId(), req.getUserText(), lastAi);
+                if (StringUtils.hasText(mainLine)) {
+                    log.info("[主线] 语境槽位优先 recordId={} kb={} step={} user={}",
+                            req.getCallRecordId(), kbId, step,
+                            req.getUserText().length() > 16 ? req.getUserText().substring(0, 16) + "…" : req.getUserText());
+                    return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
+                }
             }
         }
 
@@ -525,13 +541,19 @@ public class OllamaChatService {
         return StringUtils.hasText(alt) ? trimFragmentedReply(alt) : trimFragmentedReply(polished);
     }
 
-    /** 避免 AI 一次说多个问题或过长碎句 */
+    /** 避免 AI 一次说多个问题或过长碎句；AI 实时优先只保留第一句 */
     private String trimFragmentedReply(String reply) {
         if (!StringUtils.hasText(reply)) {
             return reply;
         }
         String t = OralScriptNormalizer.normalize(reply.trim());
         int max = aiVoiceProperties.getMaxSpeakChars();
+        if (aiVoiceProperties.isDialogLlmPrimary()) {
+            int firstEnd = firstSentenceEndIndex(t);
+            if (firstEnd >= 0 && firstEnd < t.length() - 1) {
+                t = t.substring(0, firstEnd + 1).trim();
+            }
+        }
         int firstQ = indexOfQuestionMark(t);
         if (firstQ >= 0 && firstQ < t.length() - 1) {
             int secondQ = indexOfQuestionMark(t.substring(firstQ + 1));
@@ -540,6 +562,18 @@ public class OllamaChatService {
             }
         }
         return SpeakTextLimiter.limit(t, max);
+    }
+
+    private static int firstSentenceEndIndex(String text) {
+        int end = -1;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '。' || c == '！' || c == '？' || c == '；' || c == '.' || c == '!' || c == '?') {
+                end = i;
+                break;
+            }
+        }
+        return end;
     }
 
     private static int indexOfQuestionMark(String text) {
@@ -616,6 +650,13 @@ public class OllamaChatService {
                                                   AiModelConfig modelCfg, long start) {
         if (rag == null || !rag.isDirectAnswer() || !StringUtils.hasText(rag.getDirectAnswerText())) {
             return null;
+        }
+        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)) {
+            String step = dialogMainFlowService.currentStep(req.getCallRecordId());
+            String lastAi = lastAssistantText(req.getHistory());
+            if (DialogTrainingIntentRouter.shouldDeferKeywordFaqToMainFlow(req.getUserText(), lastAi, step)) {
+                return null;
+            }
         }
         if (DialogSlotHelper.shouldBypassRag(req.getUserText())) {
             return null;
@@ -815,12 +856,16 @@ public class OllamaChatService {
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(history, currentUser);
         sb.append(DialogSlotHelper.promptSummary(slots));
         sb.append("\n\n【说话风格】像资深金融信贷顾问打电话：亲切稳重、自然流畅，不要背稿；")
-                .append("拒绝长句和书面语，改成口语短句，用逗号句号控制停顿；")
-                .append("核心卖点（额度、利息、放款、无杂费）单独成句；")
+                .append("拒绝长句和书面语，改成口语短句；")
+                .append("【重要】每次只说一句话，不超过")
+                .append(aiVoiceProperties.getMaxSpeakChars())
+                .append("字；说完就停，等客户接话；")
+                .append("核心卖点单独成句，不要一次堆多个问题；")
                 .append("禁止「诸如、综上所述、也就是说」；一次只问一个问题；")
                 .append("可用「嗯」「好的」「没事」「不好意思啊」；禁止机械套话、禁止连续两个问号；")
                 .append("客户听不清或回答含糊时，换种说法再问，不要复制上一轮原句。");
-        sb.append("\n【实时对话】严格轮次：你只在客户说完并停顿后才回复；每次1～2句口语，每句必须说完整，总长不超过")
+        sb.append("\n【实时对话】严格轮次：你只在客户说完并停顿后才回复；")
+                .append("每轮仅1句口语，必须说完整，总长不超过")
                 .append(aiVoiceProperties.getMaxSpeakChars()).append("字；已通话")
                 .append(elapsedSeconds).append("秒（上限")
                 .append(ForcedHangupRules.MAX_CALL_SECONDS).append("秒）。")

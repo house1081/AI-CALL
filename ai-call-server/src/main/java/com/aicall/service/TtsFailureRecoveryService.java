@@ -38,6 +38,7 @@ public class TtsFailureRecoveryService {
             return;
         }
         String ending = StringUtils.hasText(endingText) ? endingText.trim() : ForcedHangupRules.END_WORDS;
+        ending = ForcedHangupRules.resolvePoliteEndWords(ending);
         try {
             DialogTranscriptLog.aiReply(callRecordId, uuid, ending,
                     StringUtils.hasText(hangupReason) ? hangupReason : "ending", true);

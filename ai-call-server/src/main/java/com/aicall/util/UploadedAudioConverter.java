@@ -13,6 +13,9 @@ import java.util.concurrent.TimeUnit;
  */
 public final class UploadedAudioConverter {
 
+    /** 浏览器麦克风录音 ASR 用 16k，比强压 8k 更适合 MediaRecorder/webm */
+    public static final int BROWSER_ASR_RATE = 16000;
+
     private UploadedAudioConverter() {
     }
 
@@ -22,7 +25,27 @@ public final class UploadedAudioConverter {
         }
         String lower = filename.toLowerCase(Locale.ROOT);
         return lower.endsWith(".wav") || lower.endsWith(".mp3")
-                || lower.endsWith(".m4a") || lower.endsWith(".mp4");
+                || lower.endsWith(".m4a") || lower.endsWith(".mp4")
+                || lower.endsWith(".webm") || lower.endsWith(".ogg");
+    }
+
+    /** 管理端浏览器上传 → 16kHz/mono/16bit wav（对话训练 ASR） */
+    public static void convertToBrowserAsrWav(Path source, Path targetWav) throws IOException {
+        if (source == null || targetWav == null || !Files.exists(source)) {
+            throw new IOException("源文件不存在");
+        }
+        String lower = source.getFileName().toString().toLowerCase(Locale.ROOT);
+        Files.createDirectories(targetWav.getParent());
+        if (lower.endsWith(".wav")) {
+            Files.copy(source, targetWav, StandardCopyOption.REPLACE_EXISTING);
+        } else if (lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".mp4")
+                || lower.endsWith(".webm") || lower.endsWith(".ogg")) {
+            convertWithFfmpeg(source, targetWav, BROWSER_ASR_RATE);
+        } else {
+            throw new IOException("不支持的音频格式");
+        }
+        byte[] normalized = TelephonyWavUtil.normalizeWavPeak(Files.readAllBytes(targetWav), 0.92);
+        Files.write(targetWav, normalized);
     }
 
     public static void convertToTelephony8k(Path source, Path targetWav) throws IOException {
@@ -36,8 +59,9 @@ public final class UploadedAudioConverter {
             TelephonyWavUtil.convertFileToTelephony8k(targetWav);
             return;
         }
-        if (lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".mp4")) {
-            convertWithFfmpeg(source, targetWav);
+        if (lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".mp4")
+                || lower.endsWith(".webm") || lower.endsWith(".ogg")) {
+            convertWithFfmpeg(source, targetWav, TelephonyWavUtil.TELEPHONY_RATE);
             TelephonyWavUtil.convertFileToTelephony8k(targetWav);
             return;
         }
@@ -45,13 +69,33 @@ public final class UploadedAudioConverter {
     }
 
     private static void convertWithFfmpeg(Path input, Path outputWav) throws IOException {
-        ProcessBuilder pb = new ProcessBuilder(
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", input.toAbsolutePath().toString(),
-                "-ar", String.valueOf(TelephonyWavUtil.TELEPHONY_RATE),
-                "-ac", "1",
-                "-sample_fmt", "s16",
-                outputWav.toAbsolutePath().toString());
+        convertWithFfmpeg(input, outputWav, TelephonyWavUtil.TELEPHONY_RATE);
+    }
+
+    private static void convertWithFfmpeg(Path input, Path outputWav, int sampleRate) throws IOException {
+        String af = sampleRate >= 16000
+                ? "highpass=f=60,lowpass=f=7800,dynaudnorm=f=120:g=18,volume=4.0"
+                : null;
+        java.util.List<String> cmd = new java.util.ArrayList<>();
+        cmd.add("ffmpeg");
+        cmd.add("-y");
+        cmd.add("-hide_banner");
+        cmd.add("-loglevel");
+        cmd.add("error");
+        cmd.add("-i");
+        cmd.add(input.toAbsolutePath().toString());
+        if (af != null) {
+            cmd.add("-af");
+            cmd.add(af);
+        }
+        cmd.add("-ar");
+        cmd.add(String.valueOf(sampleRate));
+        cmd.add("-ac");
+        cmd.add("1");
+        cmd.add("-sample_fmt");
+        cmd.add("s16");
+        cmd.add(outputWav.toAbsolutePath().toString());
+        ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
         Process process;
         try {

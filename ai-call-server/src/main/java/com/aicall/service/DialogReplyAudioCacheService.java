@@ -1,6 +1,7 @@
 package com.aicall.service;
 
 import com.aicall.config.AiVoiceProperties;
+import com.aicall.entity.DialogTrainingQa;
 import com.aicall.util.TtsAudioCacheKeyUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -15,6 +16,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -29,7 +31,11 @@ public class DialogReplyAudioCacheService {
     private final AiVoiceProperties aiVoiceProperties;
     private final DashScopeVoiceTtsService dashScopeVoiceTtsService;
     private final TtsPhraseCacheService ttsPhraseCacheService;
+    private final RecordingOnlyPlaybackService recordingOnlyPlaybackService;
     private final ObjectMapper objectMapper;
+
+    private volatile long lookupHits;
+    private volatile long lookupMisses;
 
     private final Map<String, CachedReply> memoryIndex = new LinkedHashMap<>(64, 0.75f, true) {
         @Override
@@ -57,15 +63,18 @@ public class DialogReplyAudioCacheService {
         synchronized (memoryIndex) {
             CachedReply hit = memoryIndex.get(key);
             if (hit != null && isValidWav(hit.wavPath())) {
-                log.info("[问答缓存] 命中 question={} replyLen={}",
-                        abbreviate(hit.userQuestion()), hit.replyText().length());
+                lookupHits++;
+                log.info("[问答缓存] 命中 question={} replyLen={} hits={} misses={}",
+                        abbreviate(hit.userQuestion()), hit.replyText().length(), lookupHits, lookupMisses);
                 return Optional.of(hit);
             }
         }
         Path wav = cacheDir().resolve(key + ".wav");
         Path meta = cacheDir().resolve(key + ".json");
         if (!isValidWav(wav) || !Files.exists(meta)) {
-            log.debug("[问答缓存] 未命中 question={}，走 LLM+TTS 合成", abbreviate(userText));
+            lookupMisses++;
+            log.debug("[问答缓存] 未命中 question={} hits={} misses={}，走 LLM+TTS",
+                    abbreviate(userText), lookupHits, lookupMisses);
             return Optional.empty();
         }
         try {
@@ -77,8 +86,9 @@ public class DialogReplyAudioCacheService {
             synchronized (memoryIndex) {
                 memoryIndex.put(key, cached);
             }
-            log.info("[问答缓存] 磁盘命中 question={} replyLen={}",
-                    cached.userQuestion(), cached.replyText().length());
+            lookupHits++;
+            log.info("[问答缓存] 磁盘命中 question={} replyLen={} hits={} misses={}",
+                    cached.userQuestion(), cached.replyText().length(), lookupHits, lookupMisses);
             return Optional.of(cached);
         } catch (Exception e) {
             log.debug("[问答缓存] 读取元数据失败 key={}: {}", key.substring(0, 8), e.getMessage());
@@ -130,6 +140,61 @@ public class DialogReplyAudioCacheService {
                     cached.userQuestion(), normalizedReply.length(), Files.size(wav));
         } catch (Exception e) {
             log.debug("[问答缓存] 存储失败 question={}: {}", abbreviate(userText), e.getMessage());
+        }
+    }
+
+    /** RAG 重建时预热：FAQ 已有录音 → 常见问句直接命中，跳过 LLM+TTS */
+    public void warmFromFaq(DialogTrainingQa row) {
+        if (!isEnabled() || row == null || !StringUtils.hasText(row.getQuestion())) {
+            return;
+        }
+        String remark = row.getRemark() != null ? row.getRemark().trim() : "";
+        if (remark.startsWith("flow:")) {
+            return;
+        }
+        if (!StringUtils.hasText(row.getAnswerWavPath()) || !StringUtils.hasText(row.getStandardAnswer())) {
+            return;
+        }
+        if (!eligibleUserText(row.getQuestion())) {
+            return;
+        }
+        Path wav = recordingOnlyPlaybackService.resolveExistingWav(row.getAnswerWavPath().trim());
+        if (!isValidWav(wav)) {
+            return;
+        }
+        String reply = TtsAudioCacheKeyUtil.normalizeReplyText(
+                row.getStandardAnswer(), aiVoiceProperties.getMaxSpeakChars());
+        if (!StringUtils.hasText(reply)) {
+            return;
+        }
+        String key = questionKey(row.getQuestion(), null);
+        CachedReply cached = new CachedReply(reply, wav, abbreviate(row.getQuestion()));
+        synchronized (memoryIndex) {
+            memoryIndex.put(key, cached);
+        }
+        log.debug("[问答缓存] FAQ 预热 question={} qaId={}", cached.userQuestion(), row.getId());
+    }
+
+    public void warmFromFaqList(List<DialogTrainingQa> rows) {
+        if (!isEnabled() || rows == null || rows.isEmpty()) {
+            return;
+        }
+        int warmed = 0;
+        for (DialogTrainingQa row : rows) {
+            int before = memoryIndexSize();
+            warmFromFaq(row);
+            if (memoryIndexSize() > before) {
+                warmed++;
+            }
+        }
+        if (warmed > 0) {
+            log.info("[问答缓存] FAQ 预热完成 entries={} warmed={}/{}", memoryIndex.size(), warmed, rows.size());
+        }
+    }
+
+    private int memoryIndexSize() {
+        synchronized (memoryIndex) {
+            return memoryIndex.size();
         }
     }
 

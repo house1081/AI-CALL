@@ -17,4 +17,24 @@ public class RestClientConfig {
                 .setReadTimeout(Duration.ofMillis(Math.max(props.getReadTimeoutMs(), 120000)))
                 .build();
     }
+
+    /** ASR 专用：较短超时 + 快速重试，避免 Connection reset 挂 20s+ */
+    @Bean
+    public RestTemplate asrRestTemplate(AiVoiceProperties voiceProps, RestTemplateBuilder builder) {
+        int connectMs = Math.max(3000, voiceProps.getAsrConnectTimeoutMs());
+        int readMs = Math.max(8000, voiceProps.getAsrReadTimeoutMs());
+        return builder
+                .setConnectTimeout(Duration.ofMillis(connectMs))
+                .setReadTimeout(Duration.ofMillis(readMs))
+                .build();
+    }
+
+    /** RAG 嵌入专用：短超时，避免阻塞对话轮次 */
+    @Bean
+    public RestTemplate embedRestTemplate(RestTemplateBuilder builder) {
+        return builder
+                .setConnectTimeout(Duration.ofMillis(3000))
+                .setReadTimeout(Duration.ofMillis(8000))
+                .build();
+    }
 }

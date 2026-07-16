@@ -108,13 +108,65 @@ public class DialogTurnRegistry {
         return s.userTurnReady && !s.aiSpokeThisUserTurn;
     }
 
+    /** VAD 确认用户句末：建立「用户说完→AI开口」耗时锚点（比 ASR 后估算更准） */
+    public void markUserUtteranceEnded(String uuid, int trailingSilenceMs) {
+        if (!StringUtils.hasText(uuid)) {
+            return;
+        }
+        TurnState s = require(uuid);
+        long now = System.currentTimeMillis();
+        s.latencyAnchorMs = now - Math.max(0, trailingSilenceMs);
+        s.userSpeechStoppedAt = now;
+        s.listenPhaseMs = 0;
+        s.asrPhaseMs = 0;
+        s.matchPhaseMs = 0;
+        log.debug("[耗时] uuid={} 用户句末锚点 trailingSilence={}ms", uuid.trim(), trailingSilenceMs);
+    }
+
+    public void markListenPhaseMs(String uuid, long listenMs) {
+        TurnState s = state(uuid);
+        if (s != null) {
+            s.listenPhaseMs = listenMs;
+        }
+    }
+
+    public void markAsrPhaseMs(String uuid, long asrOnlyMs) {
+        TurnState s = state(uuid);
+        if (s != null) {
+            s.asrPhaseMs = asrOnlyMs;
+        }
+    }
+
+    public void markMatchPhaseMs(String uuid, long matchMs) {
+        TurnState s = state(uuid);
+        if (s != null) {
+            s.matchPhaseMs = matchMs;
+        }
+    }
+
+    /** AI 音频已下发 FS（客户即将/已经听到），记录真实开口延迟 */
+    public void markAiPlaybackStarted(String uuid, String source) {
+        TurnState s = state(uuid);
+        if (s == null || s.latencyAnchorMs <= 0) {
+            return;
+        }
+        long total = System.currentTimeMillis() - s.latencyAnchorMs;
+        if (s.matchPhaseStartMs > 0) {
+            s.matchPhaseMs = System.currentTimeMillis() - s.matchPhaseStartMs;
+        }
+        log.info("[耗时] 用户句末→AI开播 uuid={} {}ms source={} (听音{}+ASR{}+匹配{}ms)",
+                uuid.trim(), total, source, s.listenPhaseMs, s.asrPhaseMs, s.matchPhaseMs);
+        s.latencyAnchorMs = 0;
+    }
     /** 分段模式：VAD 已确认用户整句说完 */
     public void forceUserTurnReady(String uuid, int userSilenceAlreadyMs) {
         TurnState s = require(uuid);
         s.userSpeaking = false;
         long now = System.currentTimeMillis();
         s.userSpeechStoppedAt = now;
-        s.latencyAnchorMs = now - Math.max(0, userSilenceAlreadyMs);
+        if (s.latencyAnchorMs <= 0) {
+            s.latencyAnchorMs = now - Math.max(0, userSilenceAlreadyMs);
+        }
         s.userTurnReady = true;
         s.activeSpeaker = ActiveSpeaker.NONE;
         s.aiSpokeThisUserTurn = false;
@@ -130,13 +182,13 @@ public class DialogTurnRegistry {
         long now = System.currentTimeMillis();
         long anchor = s.latencyAnchorMs > 0 ? s.latencyAnchorMs : s.userSpeechStoppedAt;
         if (anchor > 0) {
-            log.info("[耗时] 用户句末→AI开播 uuid={} {}ms", uuid.trim(), now - anchor);
-            s.latencyAnchorMs = 0;
+            log.info("[耗时] uuid={} 开始应答处理 +{}ms（尚未开播）", uuid.trim(), now - anchor);
         }
         s.activeSpeaker = ActiveSpeaker.AI;
         s.aiFloorSinceMs = now;
         s.aiSpokeThisUserTurn = true;
         s.userTurnReady = false;
+        s.matchPhaseStartMs = now;
         log.info("[轮次] AI 占线 uuid={} → 播报中，用户说话则立即让出", uuid);
     }
 
@@ -188,5 +240,9 @@ public class DialogTurnRegistry {
         volatile long aiFloorSinceMs;
         /** 用于 [耗时] 用户句末→AI开播 */
         volatile long latencyAnchorMs;
+        volatile long listenPhaseMs;
+        volatile long asrPhaseMs;
+        volatile long matchPhaseMs;
+        volatile long matchPhaseStartMs;
     }
 }

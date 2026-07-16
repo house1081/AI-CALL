@@ -9,6 +9,7 @@ import com.aicall.dto.FixedVoicePrecacheStatusDto;
 import com.aicall.dto.VoiceRuntimeConfigDto;
 import com.aicall.entity.*;
 import com.aicall.mapper.*;
+import com.aicall.service.AiPromptRecordingService;
 import com.aicall.service.BillingService;
 import com.aicall.service.CosyVoiceVoiceEnrollmentService;
 import com.aicall.service.FixedPhraseVoiceAdminService;
@@ -46,6 +47,7 @@ public class AdminConfigController {
     private final EndingVoiceCacheService endingVoiceCacheService;
     private final FixedPhraseVoiceAdminService fixedPhraseVoiceAdminService;
     private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
+    private final AiPromptRecordingService aiPromptRecordingService;
     private final CosyVoiceVoiceEnrollmentService cosyVoiceVoiceEnrollmentService;
     private final com.aicall.config.AiVoiceProperties aiVoiceProperties;
     private final BillingService billingService;
@@ -193,17 +195,41 @@ public class AdminConfigController {
     public Result<Void> aiPromptSave(@RequestBody AiPrompt prompt) {
         if (prompt.getId() != null) {
             aiPromptMapper.updateById(prompt);
-            openingVoiceCacheService.regenerateAsync(prompt.getId());
-            endingVoiceCacheService.regenerateAsync(prompt.getId());
         } else {
             if (prompt.getIsActive() == null) {
                 prompt.setIsActive(0);
             }
             aiPromptMapper.insert(prompt);
+        }
+        if (!voiceRuntimeSettingsService.isSmartPrerecordMode()) {
             openingVoiceCacheService.regenerateAsync(prompt.getId());
             endingVoiceCacheService.regenerateAsync(prompt.getId());
         }
         return Result.ok();
+    }
+
+    @PostMapping("/ai-prompt/{id:\\d+}/upload-opening-audio")
+    public Result<Map<String, Object>> uploadOpeningAudio(
+            @PathVariable Integer id,
+            @RequestParam("file") MultipartFile file) throws IOException {
+        AiPrompt row = aiPromptRecordingService.uploadOpening(id, file);
+        Map<String, Object> body = new HashMap<>();
+        body.put("id", row.getId());
+        body.put("openingWavPath", row.getOpeningWavPath());
+        body.put("audioUrl", AiPromptRecordingService.toPublicUrl(row.getOpeningWavPath()));
+        return Result.ok(body);
+    }
+
+    @PostMapping("/ai-prompt/{id:\\d+}/upload-ending-audio")
+    public Result<Map<String, Object>> uploadEndingAudio(
+            @PathVariable Integer id,
+            @RequestParam("file") MultipartFile file) throws IOException {
+        AiPrompt row = aiPromptRecordingService.uploadEnding(id, file);
+        Map<String, Object> body = new HashMap<>();
+        body.put("id", row.getId());
+        body.put("endingWavPath", row.getEndingWavPath());
+        body.put("audioUrl", AiPromptRecordingService.toPublicUrl(row.getEndingWavPath()));
+        return Result.ok(body);
     }
 
     @PostMapping("/ai-prompt/activate/{id}")
@@ -212,8 +238,10 @@ public class AdminConfigController {
             p.setIsActive(p.getId().equals(id) ? 1 : 0);
             aiPromptMapper.updateById(p);
         });
-        openingVoiceCacheService.regenerateAsync(id);
-        endingVoiceCacheService.regenerateAsync(id);
+        if (!voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            openingVoiceCacheService.regenerateAsync(id);
+            endingVoiceCacheService.regenerateAsync(id);
+        }
         return Result.ok();
     }
 

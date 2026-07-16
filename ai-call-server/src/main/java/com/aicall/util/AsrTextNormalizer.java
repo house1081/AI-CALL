@@ -41,7 +41,10 @@ public final class AsrTextNormalizer {
                 .replace("周转金", "周转")
                 .replace("有啊有", "有啊")
                 .replace("哦有", "哦，有")
-                .replace("嗯有", "嗯，有");
+                .replace("嗯有", "嗯，有")
+                .replace("中介费", "居间费")
+                .replace("上不上征信", "上征信")
+                .replace("查不查征信", "查征信");
         t = t.replace("八零", "八十")
                 .replace("8十", "80")
                 .replace("８十", "80");

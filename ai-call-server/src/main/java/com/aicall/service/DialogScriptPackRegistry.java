@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,8 +25,12 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class DialogScriptPackRegistry {
 
+    private record FlowEntry(String step, int order, String script) {
+    }
+
     private record PackState(List<DialogScriptKeywordMatcher.KeywordRule> keywordRules,
-                             Map<String, String> mainFlowScripts) {
+                             Map<String, String> mainFlowScripts,
+                             List<String> mainFlowStepOrder) {
     }
 
     private final DialogRagProperties dialogRagProperties;
@@ -40,11 +45,10 @@ public class DialogScriptPackRegistry {
     }
 
     public void reloadFromDb() {
-        byKb.clear();
         List<DialogTrainingQa> rows = dialogTrainingQaMapper.selectList(
                 new LambdaQueryWrapper<DialogTrainingQa>().eq(DialogTrainingQa::getStatus, 1));
         Map<Integer, List<DialogScriptKeywordMatcher.KeywordRule>> rulesMap = new LinkedHashMap<>();
-        Map<Integer, Map<String, String>> flowMap = new LinkedHashMap<>();
+        Map<Integer, List<FlowEntry>> flowEntries = new LinkedHashMap<>();
         for (DialogTrainingQa row : rows) {
             if (row == null || !StringUtils.hasText(row.getStandardAnswer())) {
                 continue;
@@ -52,12 +56,19 @@ public class DialogScriptPackRegistry {
             int kbId = row.getKbId() != null ? row.getKbId() : DialogCallContextService.DEFAULT_KB_ID;
             String remark = row.getRemark() != null ? row.getRemark().trim() : "";
             if (remark.startsWith("flow:")) {
-                flowMap.computeIfAbsent(kbId, k -> new LinkedHashMap<>())
-                        .put(remark.substring(5), row.getStandardAnswer().trim());
+                String step = remark.substring(5).trim();
+                int order = row.getFlowOrder() != null ? row.getFlowOrder() : 9999;
+                flowEntries.computeIfAbsent(kbId, k -> new ArrayList<>())
+                        .add(new FlowEntry(step, order, row.getStandardAnswer().trim()));
                 continue;
             }
-            if (remark.startsWith("fallback:") || !row.getQuestion().trim().startsWith("[主线")) {
-                List<String> kws = DialogScriptKeywordMatcher.parseKeywords(row.getQuestion());
+            String question = row.getQuestion();
+            if (!StringUtils.hasText(question)) {
+                continue;
+            }
+            String q = question.trim();
+            if (remark.startsWith("fallback:") || !q.startsWith("[主线")) {
+                List<String> kws = DialogScriptKeywordMatcher.parseKeywords(q);
                 if (!kws.isEmpty()) {
                     int type = row.getDataType() != null ? row.getDataType() : DialogTrainingDataType.MANUAL_CORRECTION;
                     rulesMap.computeIfAbsent(kbId, k -> new ArrayList<>())
@@ -66,23 +77,42 @@ public class DialogScriptPackRegistry {
                 }
             }
         }
-        for (Map.Entry<Integer, Map<String, String>> e : flowMap.entrySet()) {
+        Map<Integer, PackState> next = new LinkedHashMap<>();
+        for (Map.Entry<Integer, List<FlowEntry>> e : flowEntries.entrySet()) {
+            List<FlowEntry> sorted = new ArrayList<>(e.getValue());
+            sorted.sort(Comparator.comparingInt(FlowEntry::order).thenComparing(FlowEntry::step));
+            Map<String, String> scripts = new LinkedHashMap<>();
+            List<String> stepOrder = new ArrayList<>();
+            for (FlowEntry fe : sorted) {
+                scripts.put(fe.step(), fe.script());
+                stepOrder.add(fe.step());
+            }
             List<DialogScriptKeywordMatcher.KeywordRule> rules =
                     List.copyOf(rulesMap.getOrDefault(e.getKey(), List.of()));
-            byKb.put(e.getKey(), new PackState(rules, Map.copyOf(e.getValue())));
+            next.put(e.getKey(), new PackState(rules, Map.copyOf(scripts), List.copyOf(stepOrder)));
         }
         for (Map.Entry<Integer, List<DialogScriptKeywordMatcher.KeywordRule>> e : rulesMap.entrySet()) {
-            byKb.computeIfAbsent(e.getKey(), k -> new PackState(List.of(), Map.of()));
-            PackState old = byKb.get(e.getKey());
-            byKb.put(e.getKey(), new PackState(List.copyOf(e.getValue()), old.mainFlowScripts()));
+            next.computeIfAbsent(e.getKey(), k -> new PackState(List.of(), Map.of(), List.of()));
+            PackState old = next.get(e.getKey());
+            next.put(e.getKey(), new PackState(List.copyOf(e.getValue()), old.mainFlowScripts(), old.mainFlowStepOrder()));
         }
+        for (Integer key : List.copyOf(byKb.keySet())) {
+            if (!next.containsKey(key)) {
+                byKb.remove(key);
+            }
+        }
+        byKb.putAll(next);
         log.info("[话术包] 已加载 知识库数={}", byKb.size());
         byKb.forEach((kb, pack) -> log.info("[话术包] kb={} 主线={} 兜底={}",
                 kb, pack.mainFlowScripts().size(), pack.keywordRules().size()));
     }
 
     private PackState pack(int kbId) {
-        return byKb.getOrDefault(kbId, new PackState(List.of(), Map.of()));
+        return byKb.getOrDefault(kbId, new PackState(List.of(), Map.of(), List.of()));
+    }
+
+    public List<String> mainFlowStepOrder(int kbId) {
+        return pack(kbId).mainFlowStepOrder();
     }
 
     public DialogScriptKeywordMatcher.KeywordRule matchKeyword(String userText, int kbId) {
@@ -100,7 +130,6 @@ public class DialogScriptPackRegistry {
         return pack(kbId).mainFlowScripts().size();
     }
 
-    /** 主线话术去重列表，供 TTS 预热缓存 */
     public List<String> distinctMainFlowScripts(int kbId) {
         return pack(kbId).mainFlowScripts().values().stream()
                 .filter(StringUtils::hasText)
@@ -114,7 +143,7 @@ public class DialogScriptPackRegistry {
     }
 
     public String silenceProbeText(int attempt, int kbId) {
-        int n = Math.max(1, Math.min(attempt, 3));
+        int n = Math.max(1, Math.min(attempt, 5));
         for (DialogScriptKeywordMatcher.KeywordRule rule : pack(kbId).keywordRules()) {
             for (String kw : rule.keywords()) {
                 if (kw.contains("静默") || kw.contains("没声音")) {

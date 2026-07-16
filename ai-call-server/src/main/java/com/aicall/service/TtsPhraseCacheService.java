@@ -37,6 +37,7 @@ public class TtsPhraseCacheService {
     private final DashScopeVoiceTtsService dashScopeVoiceTtsService;
     private final AsrWarmupService asrWarmupService;
     private final DialogScriptPackRegistry dialogScriptPackRegistry;
+    private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
 
     private final Map<String, Path> cache = new LinkedHashMap<>(64, 0.75f, true) {
         @Override
@@ -54,6 +55,11 @@ public class TtsPhraseCacheService {
     @EventListener(ContextRefreshedEvent.class)
     public void warmCommonPhrasesOnStartup() {
         if (!aiVoiceProperties.isTtsPhraseWarmOnStartup()) {
+            phraseWarmComplete = true;
+            return;
+        }
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            log.info("[TTS短语缓存] 智能预录模式，跳过 CosyVoice 话术预热");
             phraseWarmComplete = true;
             return;
         }

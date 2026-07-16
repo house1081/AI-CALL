@@ -3,7 +3,7 @@ package com.aicall.service;
 import com.aicall.common.CallStatus;
 import com.aicall.common.HangupType;
 import com.aicall.config.FreeSwitchProperties;
-import com.aicall.service.prerecord.PrerecordPlaybackService;
+import com.aicall.service.RecordingOnlyPlaybackService;
 import com.aicall.dto.SensitiveWordMatch;
 import com.aicall.entity.CallRecord;
 import com.aicall.entity.RiskConfig;
@@ -36,7 +36,8 @@ public class HumanTransferService {
     private final FreeSwitchEslService eslService;
     private final VoicePlaybackService voicePlaybackService;
     private final CallAiVoiceService callAiVoiceService;
-    private final PrerecordPlaybackService prerecordPlaybackService;
+    private final RecordingOnlyPlaybackService recordingOnlyPlaybackService;
+    private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
     private final CallDialogPersistService callDialogPersistService;
     private final CallSessionService callSessionService;
     private final CallEndSummaryService callEndSummaryService;
@@ -163,15 +164,21 @@ public class HumanTransferService {
         if (!eslService.uuidExists(uuid)) {
             return false;
         }
-        try {
-            return prerecordPlaybackService.playTransferSequence(uuid);
-        } catch (Exception e) {
-            log.debug("[转人工] 预录转接提示不可用 uuid={}: {}", uuid, e.getMessage());
-        }
         String prompt = StringUtils.hasText(cfg.getHumanTransferPrompt())
                 ? cfg.getHumanTransferPrompt().trim()
                 : "我马上为您转接人工坐席，请稍等";
         if (!StringUtils.hasText(prompt)) {
+            return false;
+        }
+        try {
+            if (recordingOnlyPlaybackService.playCachedPhrase(uuid, prompt, null)) {
+                return true;
+            }
+        } catch (Exception e) {
+            log.debug("[转人工] 转接提示录音不可用 uuid={}: {}", uuid, e.getMessage());
+        }
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            log.warn("[转人工] 智能预录无转接提示录音 uuid={}", uuid);
             return false;
         }
         try {

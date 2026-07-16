@@ -35,6 +35,7 @@ public class OutboundAnswerVoiceService {
     private final OpeningVoicePrewarmService openingVoicePrewarmService;
     private final OpeningPlaybackService openingPlaybackService;
     private final OutboundNoAnswerService outboundNoAnswerService;
+    private final CallSessionRecordService callSessionRecordService;
 
     private final ExecutorService watchExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "outbound-answer-voice");
@@ -147,6 +148,7 @@ public class OutboundAnswerVoiceService {
                         fsUuid, record.getId(), aiVoiceProperties.isDialogEnabled());
                 if (aiVoiceProperties.isDialogEnabled()) {
                     Integer recordId = record.getId();
+                    callSessionRecordService.startSessionRecord(fsUuid, recordId);
                     startDialogLoop(fsUuid, recordId);
                 }
             } catch (Exception e) {

@@ -42,6 +42,7 @@ public class OpeningPlaybackService {
             return;
         }
         try {
+            eslService.ensureOutboundMediaReady(uuid);
             if (tryPlayCachedOpening(uuid)) {
                 log.info("[开场白] 摘机即播 uuid={}", uuid);
             } else {
@@ -82,11 +83,13 @@ public class OpeningPlaybackService {
         eslService.ensureOutboundMediaReady(uuid);
 
         boolean played = tryPlayCachedOpening(uuid);
-        if (!played) {
+        if (!played && !voiceRuntimeSettingsService.isSmartPrerecordMode()) {
             log.warn("[开场白] 无预录音，改用实时 CosyVoice TTS uuid={} recordId={}", uuid, callRecordId);
             played = aiVoiceProperties.isTtsStreamEnabled()
                     ? voicePlaybackService.playTextStreaming(uuid, opening)
                     : voicePlaybackService.playOnChannel(uuid, opening);
+        } else if (!played) {
+            log.warn("[开场白] 智能预录模式无开场录音 uuid={} recordId={}", uuid, callRecordId);
         }
         if (!played) {
             log.error("[开场白] 预录音与实时 TTS 均失败 uuid={} recordId={}，请检查 CosyVoice 配置与 FS 播放路径",
@@ -120,7 +123,7 @@ public class OpeningPlaybackService {
             return false;
         }
         boolean played = fixedPhrasePlaybackService.playCachedEnding(uuid, callRecordId, endText);
-        if (!played) {
+        if (!played && !voiceRuntimeSettingsService.isSmartPrerecordMode()) {
             log.warn("[结束语] 无预录音，尝试 CosyVoice/本地播报 uuid={}", uuid);
             played = aiVoiceProperties.isTtsStreamEnabled()
                     ? voicePlaybackService.playTextStreaming(uuid, endText)

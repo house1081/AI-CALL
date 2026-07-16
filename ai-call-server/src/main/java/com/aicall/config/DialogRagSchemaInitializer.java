@@ -74,6 +74,10 @@ public class DialogRagSchemaInitializer {
                 "ALTER TABLE `ai_prompt` ADD COLUMN `prompt_name` varchar(100) DEFAULT NULL COMMENT '模板名称' AFTER `id`");
         tryColumn("ai_prompt", "kb_id",
                 "ALTER TABLE `ai_prompt` ADD COLUMN `kb_id` int DEFAULT NULL COMMENT '绑定训练知识库' AFTER `end_remarks`");
+        tryColumn("ai_prompt", "opening_wav_path",
+                "ALTER TABLE `ai_prompt` ADD COLUMN `opening_wav_path` varchar(500) DEFAULT NULL COMMENT '开场白录音路径' AFTER `end_remarks`");
+        tryColumn("ai_prompt", "ending_wav_path",
+                "ALTER TABLE `ai_prompt` ADD COLUMN `ending_wav_path` varchar(500) DEFAULT NULL COMMENT '结束语录音路径' AFTER `opening_wav_path`");
         tryColumn("tenant", "prompt_id",
                 "ALTER TABLE `tenant` ADD COLUMN `prompt_id` int DEFAULT NULL COMMENT '话术模板ID' AFTER `daily_call_limit`");
         tryColumn("call_task", "prompt_id",
@@ -82,6 +86,10 @@ public class DialogRagSchemaInitializer {
                 "ALTER TABLE `call_record` ADD COLUMN `prompt_id` int DEFAULT NULL COMMENT '快照-模板' AFTER `task_id`");
         tryColumn("call_record", "kb_id",
                 "ALTER TABLE `call_record` ADD COLUMN `kb_id` int DEFAULT NULL COMMENT '快照-知识库' AFTER `prompt_id`");
+        tryColumn("dialog_training_qa", "answer_wav_path",
+                "ALTER TABLE `dialog_training_qa` ADD COLUMN `answer_wav_path` varchar(500) DEFAULT NULL COMMENT '标准答录音路径' AFTER `standard_answer`");
+        tryColumn("dialog_training_qa", "flow_order",
+                "ALTER TABLE `dialog_training_qa` ADD COLUMN `flow_order` int DEFAULT NULL COMMENT '主线节点排序' AFTER `remark`");
         try {
             jdbcTemplate.update("UPDATE `dialog_training_qa` SET `kb_id` = 1 WHERE `kb_id` IS NULL OR `kb_id` = 0");
             jdbcTemplate.update("UPDATE `ai_prompt` SET `kb_id` = 1 WHERE `kb_id` IS NULL");

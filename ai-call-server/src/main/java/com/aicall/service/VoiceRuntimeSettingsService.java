@@ -95,7 +95,12 @@ public class VoiceRuntimeSettingsService {
     }
 
     public int resolveAsrVadSilenceMs(String fsUuid) {
-        return resolveUserSilenceMs(fsUuid);
+        int profileMs = resolveUserSilenceMs(fsUuid);
+        int configured = aiVoiceProperties.getAsrVadSilenceMs();
+        if (configured > 0 && configured < profileMs) {
+            return configured;
+        }
+        return profileMs;
     }
 
     public String getCosyvoiceCloneVoiceId() {

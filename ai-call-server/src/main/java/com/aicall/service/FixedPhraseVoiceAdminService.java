@@ -25,14 +25,21 @@ public class FixedPhraseVoiceAdminService {
     private final FixedPhraseVoiceCatalogService voiceCatalog;
     private final OpeningVoiceCacheService openingVoiceCacheService;
     private final EndingVoiceCacheService endingVoiceCacheService;
+    private final AiPromptRecordingService aiPromptRecordingService;
 
     public FixedVoicePrecacheStatusDto getStatus() {
         AiPrompt active = loadActivePrompt();
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            return buildUploadStatus(active);
+        }
         return buildStatus(active, null);
     }
 
-    /** 为全部 CosyVoice 音色同步预生成开场白与结束语 */
+    /** 为全部 CosyVoice 音色同步预生成开场白与结束语（AI 实时模式） */
     public FixedVoicePrecacheStatusDto precacheActiveSync() {
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            throw new BizException("智能预录外呼请上传开场白/结束语录音，不支持 CosyVoice 预合成");
+        }
         if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()) {
             throw new BizException("固定话术预生成已在配置中关闭（opening-voice-precache-enabled=false）");
         }
@@ -55,9 +62,40 @@ public class FixedPhraseVoiceAdminService {
         return buildStatus(active, resolveResultMessage(active));
     }
 
-    private AiPrompt loadActivePrompt() {
-        return aiPromptMapper.selectOne(
-                new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
+    private FixedVoicePrecacheStatusDto buildUploadStatus(AiPrompt active) {
+        FixedVoicePrecacheStatusDto dto = new FixedVoicePrecacheStatusDto();
+        dto.setUploadMode(true);
+        dto.setPrecacheEnabled(false);
+        if (active != null) {
+            dto.setActivePromptId(active.getId());
+            dto.setOpeningRemarks(active.getOpeningRemarks());
+            dto.setEndRemarks(active.getEndRemarks());
+            dto.setOpeningReady(aiPromptRecordingService.hasOpeningRecording(active));
+            dto.setEndingReady(aiPromptRecordingService.hasEndingRecording(active));
+            dto.setOpeningAudioUrl(AiPromptRecordingService.toPublicUrl(active.getOpeningWavPath()));
+            dto.setEndingAudioUrl(AiPromptRecordingService.toPublicUrl(active.getEndingWavPath()));
+            dto.setOpeningReadyCount(Boolean.TRUE.equals(dto.getOpeningReady()) ? 1 : 0);
+            dto.setEndingReadyCount(Boolean.TRUE.equals(dto.getEndingReady()) ? 1 : 0);
+            dto.setTotalVoiceCount(1);
+        } else {
+            dto.setOpeningReady(false);
+            dto.setEndingReady(false);
+            dto.setOpeningReadyCount(0);
+            dto.setEndingReadyCount(0);
+            dto.setTotalVoiceCount(0);
+        }
+        if (active == null) {
+            dto.setMessage("请先启用一套话术模板");
+        } else if (Boolean.TRUE.equals(dto.getOpeningReady()) && Boolean.TRUE.equals(dto.getEndingReady())) {
+            dto.setMessage("开场白与结束语上传录音已就绪");
+        } else if (!Boolean.TRUE.equals(dto.getOpeningReady()) && !Boolean.TRUE.equals(dto.getEndingReady())) {
+            dto.setMessage("请上传开场白与结束语录音（8k 电话 wav）");
+        } else if (!Boolean.TRUE.equals(dto.getOpeningReady())) {
+            dto.setMessage("请上传开场白录音");
+        } else {
+            dto.setMessage("请上传结束语录音");
+        }
+        return dto;
     }
 
     private FixedVoicePrecacheStatusDto buildStatus(AiPrompt active, String message) {
@@ -90,6 +128,11 @@ public class FixedPhraseVoiceAdminService {
             dto.setMessage("尚未配置 CosyVoice 音色，外呼接通/挂断将跳过固定话术播报");
         }
         return dto;
+    }
+
+    private AiPrompt loadActivePrompt() {
+        return aiPromptMapper.selectOne(
+                new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
     }
 
     private String resolveResultMessage(AiPrompt active) {

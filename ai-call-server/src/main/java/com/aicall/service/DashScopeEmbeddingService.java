@@ -30,12 +30,12 @@ public class DashScopeEmbeddingService {
 
     public DashScopeEmbeddingService(DialogRagProperties dialogRagProperties,
                                      DashScopeApiKeyResolver dashScopeApiKeyResolver,
-                                     @Qualifier("llmRestTemplate") RestTemplate llmRestTemplate,
+                                     @Qualifier("embedRestTemplate") RestTemplate embedRestTemplate,
                                      ObjectMapper objectMapper,
                                      EmbeddingCacheService embeddingCacheService) {
         this.dialogRagProperties = dialogRagProperties;
         this.dashScopeApiKeyResolver = dashScopeApiKeyResolver;
-        this.llmRestTemplate = llmRestTemplate;
+        this.llmRestTemplate = embedRestTemplate;
         this.objectMapper = objectMapper;
         this.embeddingCacheService = embeddingCacheService;
     }

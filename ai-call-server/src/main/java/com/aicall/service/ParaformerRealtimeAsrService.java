@@ -13,6 +13,7 @@ import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -33,10 +34,17 @@ public class ParaformerRealtimeAsrService {
 
     private static final String WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
     private static final int CHUNK_BYTES_8K = 3200;
+    private static final HttpClient WS_HTTP_CLIENT = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(4))
+            .build();
 
     private final ObjectMapper objectMapper;
 
     public String recognize(Path wavFile, String apiKey, String model, int timeoutSec) {
+        return recognize(wavFile, apiKey, model, timeoutSec, 8000);
+    }
+
+    public String recognize(Path wavFile, String apiKey, String model, int timeoutSec, int sampleRate) {
         if (wavFile == null || !Files.exists(wavFile) || !StringUtils.hasText(apiKey)) {
             return "";
         }
@@ -46,11 +54,11 @@ public class ParaformerRealtimeAsrService {
         AtomicBoolean taskStarted = new AtomicBoolean(false);
         AtomicReference<String> text = new AtomicReference<>("");
         AtomicReference<String> error = new AtomicReference<>();
-        HttpClient httpClient = HttpClient.newHttpClient();
+        AtomicBoolean finalReceived = new AtomicBoolean(false);
         WebSocket[] holder = new WebSocket[1];
         try {
             byte[] audio = Files.readAllBytes(wavFile);
-            CompletableFuture<WebSocket> future = httpClient.newWebSocketBuilder()
+            CompletableFuture<WebSocket> future = WS_HTTP_CLIENT.newWebSocketBuilder()
                     .header("Authorization", "bearer " + apiKey)
                     .buildAsync(URI.create(WS_URL), new WebSocket.Listener() {
                         @Override
@@ -58,7 +66,7 @@ public class ParaformerRealtimeAsrService {
                             holder[0] = webSocket;
                             webSocket.request(1);
                             try {
-                                sendJson(webSocket, runTaskJson(taskId, model));
+                                sendJson(webSocket, runTaskJson(taskId, model, sampleRate));
                             } catch (Exception e) {
                                 error.set(e.getMessage());
                                 done.countDown();
@@ -78,12 +86,20 @@ public class ParaformerRealtimeAsrService {
                                     case "result-generated" -> {
                                         JsonNode sentence = root.path("payload").path("output").path("sentence");
                                         String t = sentence.path("text").asText("").trim();
-                                        if (StringUtils.hasText(t)
-                                                && (sentence.path("sentence_end").asBoolean(false) || !StringUtils.hasText(text.get()))) {
+                                        boolean sentenceEnd = sentence.path("sentence_end").asBoolean(false);
+                                        if (StringUtils.hasText(t)) {
                                             text.set(t);
+                                            if (sentenceEnd) {
+                                                finalReceived.set(true);
+                                                done.countDown();
+                                            }
                                         }
                                     }
-                                    case "task-finished" -> done.countDown();
+                                    case "task-finished" -> {
+                                        if (!finalReceived.get()) {
+                                            done.countDown();
+                                        }
+                                    }
                                     case "task-failed" -> {
                                         error.set(root.path("header").path("error_message").asText("task-failed"));
                                         done.countDown();
@@ -134,7 +150,7 @@ public class ParaformerRealtimeAsrService {
     }
 
     private void streamAudio(WebSocket webSocket, byte[] audio, String taskId) {
-        Thread t = new Thread(() -> {
+        Runnable send = () -> {
             try {
                 if (audio.length <= 128_000) {
                     webSocket.sendBinary(ByteBuffer.wrap(audio), true);
@@ -146,15 +162,16 @@ public class ParaformerRealtimeAsrService {
                         webSocket.sendBinary(ByteBuffer.wrap(chunk), true);
                     }
                 }
-                try {
-                    sendJson(webSocket, finishTaskJson(taskId));
-                } catch (Exception e) {
-                    log.debug("[ASR] Paraformer finish-task 失败: {}", e.getMessage());
-                }
+                sendJson(webSocket, finishTaskJson(taskId));
             } catch (Exception e) {
                 log.debug("[ASR] Paraformer 送音频失败: {}", e.getMessage());
             }
-        }, "paraformer-asr-send");
+        };
+        if (audio.length <= 128_000) {
+            send.run();
+            return;
+        }
+        Thread t = new Thread(send, "paraformer-asr-send");
         t.setDaemon(true);
         t.start();
     }
@@ -163,9 +180,9 @@ public class ParaformerRealtimeAsrService {
         webSocket.sendText(json, true);
     }
 
-    private String runTaskJson(String taskId, String model) throws Exception {
+    private String runTaskJson(String taskId, String model, int sampleRate) throws Exception {
         Map<String, Object> parameters = new LinkedHashMap<>();
-        parameters.put("sample_rate", 8000);
+        parameters.put("sample_rate", sampleRate);
         parameters.put("format", "wav");
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("task_group", "audio");

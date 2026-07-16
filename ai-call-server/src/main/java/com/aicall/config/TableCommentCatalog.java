@@ -99,6 +99,8 @@ public final class TableCommentCatalog {
                 "prompt_content", "系统提示词/角色设定",
                 "opening_remarks", "开场白文案",
                 "end_remarks", "结束语文案",
+                "opening_wav_path", "开场白录音路径",
+                "ending_wav_path", "结束语录音路径",
                 "kb_id", "绑定的训练知识库ID",
                 "is_active", "是否启用：1是 0否",
                 "update_time", "更新时间"));
@@ -264,11 +266,13 @@ public final class TableCommentCatalog {
                 "kb_id", "所属知识库ID",
                 "question", "用户问题/意图",
                 "standard_answer", "标准回复话术",
+                "answer_wav_path", "标准答录音路径（智能预录外呼播放）",
                 "data_type", "数据类型：1人工修正 2优质样本 3负样本",
                 "weight", "RAG检索权重加成",
                 "status", "状态：1启用 0停用",
                 "source_call_id", "来源通话记录ID",
                 "remark", "备注",
+                "flow_order", "主线节点排序",
                 "create_time", "创建时间",
                 "update_time", "更新时间"));
         cols(all, "dialog_knowledge_base", map(

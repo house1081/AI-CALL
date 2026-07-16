@@ -52,16 +52,16 @@ public class DialogScriptPackImportService {
         int fallback = 0;
         JsonNode flows = root.path("mainFlow");
         if (flows.isArray()) {
+            int order = 10;
             for (JsonNode n : flows) {
                 String step = text(n, "step");
                 String script = text(n, "script");
                 if (!StringUtils.hasText(step) || !StringUtils.hasText(script)) {
                     continue;
                 }
-                saveRow(kbId, "[主线" + step + "]" + text(n, "scene"),
-                        script, DialogTrainingDataType.QUALITY_SAMPLE,
-                        "flow:" + step, BigDecimal.valueOf(5.0));
+                saveFlowRow(kbId, step, text(n, "scene"), script, order);
                 main++;
+                order += 10;
             }
         }
         JsonNode backs = root.path("fallbacks");
@@ -79,7 +79,7 @@ public class DialogScriptPackImportService {
                         || keywords.contains("同行"))) {
                     type = DialogTrainingDataType.NEGATIVE;
                 }
-                saveRow(kbId, q, answer, type, "fallback:" + no, BigDecimal.valueOf(3.5));
+                saveOrUpdateFallbackRow(kbId, no, q, answer, type, "fallback:" + no, BigDecimal.valueOf(3.5));
                 fallback++;
             }
         }
@@ -92,6 +92,68 @@ public class DialogScriptPackImportService {
         r.put("indexSize", dialogRagRetrievalService.indexSizeByKb(kbId));
         r.put("packVersion", text(root, "version"));
         return r;
+    }
+
+    /** 仅同步 FAQ 兜底条目（按 fallback 编号 upsert，保留已有录音路径） */
+    public Map<String, Object> syncFallbacksFromPack(int kbId) {
+        JsonNode root = loadPack();
+        int synced = 0;
+        int inserted = 0;
+        int updated = 0;
+        JsonNode backs = root.path("fallbacks");
+        if (backs.isArray()) {
+            for (JsonNode n : backs) {
+                String keywords = text(n, "keywords");
+                String answer = text(n, "answer");
+                if (!StringUtils.hasText(keywords) || !StringUtils.hasText(answer)) {
+                    continue;
+                }
+                int no = n.path("no").asInt(0);
+                if (no <= 0) {
+                    continue;
+                }
+                String q = no + "." + keywords;
+                int type = DialogTrainingDataType.MANUAL_CORRECTION;
+                if (answer.contains("再见") && (keywords.contains("辱骂") || keywords.contains("捣乱")
+                        || keywords.contains("同行"))) {
+                    type = DialogTrainingDataType.NEGATIVE;
+                }
+                boolean created = saveOrUpdateFallbackRow(kbId, no, q, answer, type, "fallback:" + no,
+                        BigDecimal.valueOf(3.5));
+                synced++;
+                if (created) {
+                    inserted++;
+                } else {
+                    updated++;
+                }
+            }
+        }
+        dialogRagRetrievalService.rebuildIndex();
+        dialogScriptPackRegistry.reloadFromDb();
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("kbId", kbId);
+        r.put("synced", synced);
+        r.put("inserted", inserted);
+        r.put("updated", updated);
+        r.put("indexSize", dialogRagRetrievalService.indexSizeByKb(kbId));
+        r.put("packVersion", text(root, "version"));
+        return r;
+    }
+
+    private void saveFlowRow(int kbId, String step, String scene, String script, int flowOrder) {
+        String question = "[主线" + step + "]" + scene;
+        if (dialogTrainingQaService.existsQuestion(question, kbId)) {
+            return;
+        }
+        DialogTrainingQaSaveRequest req = new DialogTrainingQaSaveRequest();
+        req.setKbId(kbId);
+        req.setQuestion(trim(question, 500));
+        req.setStandardAnswer(trim(script, 2000));
+        req.setDataType(DialogTrainingDataType.QUALITY_SAMPLE);
+        req.setRemark("flow:" + step);
+        req.setWeight(BigDecimal.valueOf(5.0));
+        req.setStatus(1);
+        dialogTrainingQaService.saveFlowRow(req, flowOrder);
     }
 
     private void saveRow(int kbId, String question, String answer, int dataType, String remark, BigDecimal weight) {
@@ -107,6 +169,36 @@ public class DialogScriptPackImportService {
         req.setWeight(weight);
         req.setStatus(1);
         dialogTrainingQaService.save(req);
+    }
+
+    /** @return true 新建，false 更新已有 */
+    private boolean saveOrUpdateFallbackRow(int kbId, int no, String question, String answer, int dataType,
+                                            String remark, BigDecimal weight) {
+        DialogTrainingQa existing = dialogTrainingQaMapper.selectOne(
+                new LambdaQueryWrapper<DialogTrainingQa>()
+                        .eq(DialogTrainingQa::getKbId, kbId)
+                        .eq(DialogTrainingQa::getRemark, remark)
+                        .last("LIMIT 1"));
+        if (existing != null) {
+            existing.setQuestion(trim(question, 500));
+            existing.setStandardAnswer(trim(answer, 2000));
+            existing.setDataType(dataType);
+            existing.setWeight(weight);
+            existing.setStatus(1);
+            dialogTrainingQaMapper.updateById(existing);
+            return false;
+        }
+        DialogTrainingQaSaveRequest req = new DialogTrainingQaSaveRequest();
+        req.setKbId(kbId);
+        req.setQuestion(trim(question, 500));
+        req.setStandardAnswer(trim(answer, 2000));
+        req.setDataType(dataType);
+        req.setRemark(remark);
+        req.setWeight(weight);
+        req.setStatus(1);
+        dialogTrainingQaService.save(req);
+        log.info("[话术包] 新增 FAQ 兜底 no={} kbId={}", no, kbId);
+        return true;
     }
 
     private JsonNode loadPack() {
@@ -132,6 +224,7 @@ public class DialogScriptPackImportService {
     public void importOnStartupIfEmpty() {
         if (!dialogRagProperties.isLoanPackAutoImport()) {
             dialogScriptPackRegistry.reloadFromDb();
+            syncFallbacksOnStartupIfEnabled();
             return;
         }
         int kbId = DialogCallContextService.DEFAULT_KB_ID;
@@ -139,6 +232,7 @@ public class DialogScriptPackImportService {
                 new LambdaQueryWrapper<DialogTrainingQa>().eq(DialogTrainingQa::getKbId, kbId));
         if (count != null && count > 0) {
             dialogScriptPackRegistry.reloadFromDb();
+            syncFallbacksOnStartupIfEnabled();
             return;
         }
         try {
@@ -146,6 +240,18 @@ public class DialogScriptPackImportService {
             log.info("[话术包] 首次启动自动导入完成 {}", r);
         } catch (Exception e) {
             log.warn("[话术包] 自动导入跳过: {}", e.getMessage());
+        }
+    }
+
+    private void syncFallbacksOnStartupIfEnabled() {
+        if (!dialogRagProperties.isLoanPackSyncFallbacksOnStartup()) {
+            return;
+        }
+        try {
+            Map<String, Object> r = syncFallbacksFromPack(DialogCallContextService.DEFAULT_KB_ID);
+            log.info("[话术包] FAQ 兜底同步完成 {}", r);
+        } catch (Exception e) {
+            log.warn("[话术包] FAQ 兜底同步跳过: {}", e.getMessage());
         }
     }
 }

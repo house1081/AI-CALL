@@ -1,5 +1,6 @@
 package com.aicall.util;
 
+import com.aicall.common.DialogQueryNormalizer;
 import org.springframework.util.StringUtils;
 
 import java.util.Locale;
@@ -25,14 +26,16 @@ public final class TtsAudioCacheKeyUtil {
         return OralScriptNormalizer.normalize(limited);
     }
 
-    /** 用户问题：去标点空白，便于「同样的问题」命中 */
+    /** 用户问题：ASR 纠偏 + 去口头语 + 去标点，便于「同样的问题」命中 */
     public static String normalizeUserQuestion(String text) {
         if (!StringUtils.hasText(text)) {
             return "";
         }
-        String s = text.trim().replace('\n', ' ');
+        String s = AsrTextNormalizer.normalize(text.trim().replace('\n', ' '));
+        s = DialogQueryNormalizer.forRetrieval(s);
         s = QUESTION_PUNCT.matcher(s).replaceAll("");
         s = s.replaceAll("\\s+", "");
+        s = s.replaceAll("[啊呢吧嘛]$", "");
         return s.toLowerCase(Locale.ROOT);
     }
 }

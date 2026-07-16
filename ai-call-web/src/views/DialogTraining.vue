@@ -18,6 +18,7 @@
         <el-alert type="info" :closable="false" style="margin-bottom:16px">
           人工修正问答保存后<strong>即时写入向量索引</strong>，外呼/对话训练下一轮生效，无需微调模型。
           高置信匹配直出标准答案（跳过 LLM）；无匹配走严格兜底，禁止模型自由发挥。
+          选择<strong>智能预录外呼</strong>模式时，须为每条标准答上传 8k 电话录音。
         </el-alert>
         <el-descriptions v-if="stats" :column="4" border size="small" style="margin-bottom:16px">
           <el-descriptions-item label="RAG 状态">
@@ -52,6 +53,21 @@
           <el-form-item label="标准回复">
             <el-input v-model="form.standardAnswer" type="textarea" :rows="4"
               placeholder="人工训练后的标准话术（直出/注入 LLM）" />
+          </el-form-item>
+          <el-form-item v-if="form.id" label="应答录音">
+            <el-upload
+              :auto-upload="false"
+              :show-file-list="false"
+              accept=".wav,.mp3,.m4a,.mp4"
+              :on-change="onAudioPick"
+            >
+              <el-button :loading="audioUploading">上传/替换录音</el-button>
+            </el-upload>
+            <el-button v-if="form.audioUrl" link type="primary" @click="playAudio(form.audioUrl)">试听当前</el-button>
+            <div class="el-upload__tip">智能预录外呼将播放此录音；支持 wav / mp3 / m4a / mp4</div>
+          </el-form-item>
+          <el-form-item v-else label="应答录音">
+            <span class="el-upload__tip">请先保存问答，再上传录音</span>
           </el-form-item>
           <el-form-item label="权重">
             <el-input-number v-model="form.weight" :min="0.5" :max="10" :step="0.5" />
@@ -124,6 +140,12 @@
           </el-table-column>
           <el-table-column prop="question" label="问题" show-overflow-tooltip />
           <el-table-column prop="standardAnswer" label="标准答" show-overflow-tooltip />
+          <el-table-column label="录音" width="90">
+            <template #default="{ row }">
+              <el-button v-if="audioUrl(row)" link type="primary" size="small" @click.stop="playAudio(audioUrl(row))">试听</el-button>
+              <span v-else style="color:#999">未上传</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="weight" label="权重" width="65" />
           <el-table-column label="操作" width="120">
             <template #default="{ row }">
@@ -151,6 +173,7 @@ const testQuestion = ref('')
 const testResult = ref(null)
 const importCallId = ref('')
 const callPairs = ref([])
+const audioUploading = ref(false)
 
 const defaultForm = () => ({
   id: null,
@@ -160,8 +183,48 @@ const defaultForm = () => ({
   standardAnswer: '',
   weight: 3,
   status: 1,
-  remark: ''
+  remark: '',
+  audioUrl: ''
 })
+
+const audioUrl = (row) => {
+  if (!row?.answerWavPath) return ''
+  const p = row.answerWavPath.replace(/\\/g, '/')
+  const idx = p.indexOf('/uploads/')
+  return idx >= 0 ? p.substring(idx) : (p.startsWith('uploads/') ? '/' + p : p)
+}
+
+const playAudio = (url) => {
+  if (!url) return
+  const audio = new Audio(url)
+  audio.play().catch(() => ElMessage.warning('无法播放，请检查录音文件'))
+}
+
+const onAudioPick = async (file) => {
+  if (!form.value.id) {
+    ElMessage.warning('请先保存问答再上传录音')
+    return
+  }
+  audioUploading.value = true
+  try {
+    const fd = new FormData()
+    fd.append('file', file.raw)
+    const res = await fetch(`/api/admin/dialog-training/${form.value.id}/upload-audio`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${localStorage.getItem('admin_token')}` },
+      body: fd
+    })
+    const json = await res.json()
+    if (json.code !== 200) throw new Error(json.message || '上传失败')
+    form.value.audioUrl = json.data?.audioUrl || ''
+    ElMessage.success('录音已更新')
+    loadList()
+  } catch (e) {
+    ElMessage.error(e.message || '上传失败')
+  } finally {
+    audioUploading.value = false
+  }
+}
 const form = ref(defaultForm())
 
 const typeLabel = (t) => ({ 1: '人工修正', 2: '优质样本', 3: '负样本' }[t] || '-')
@@ -214,7 +277,8 @@ const editRow = (row) => {
     standardAnswer: row.standardAnswer,
     weight: row.weight != null ? Number(row.weight) : 3,
     status: row.status,
-    remark: row.remark || ''
+    remark: row.remark || '',
+    audioUrl: audioUrl(row)
   }
 }
 

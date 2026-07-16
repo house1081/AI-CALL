@@ -1,6 +1,7 @@
 package com.aicall.service;
 
 import com.aicall.common.CallStatus;
+import com.aicall.common.ForcedHangupRules;
 import com.aicall.common.HangupType;
 import com.aicall.entity.CallRecord;
 import com.aicall.mapper.CallRecordMapper;
@@ -35,6 +36,7 @@ public class TaskCallHangupService {
     private final StringRedisTemplate redisTemplate;
     private final CallDialogPersistService callDialogPersistService;
     private final CallEndSummaryService callEndSummaryService;
+    private final TtsFailureRecoveryService ttsFailureRecoveryService;
 
     /**
      * @param paused true=暂停，false=终止
@@ -111,7 +113,12 @@ public class TaskCallHangupService {
                 boolean answered = StringUtils.hasText(uuid) && eslService.isChannelAnswered(uuid);
                 if (StringUtils.hasText(uuid)) {
                     voicePlaybackService.stopChannelPlayback(uuid);
-                    killChannel(uuid);
+                    if (answered && eslService.uuidExists(uuid)) {
+                        ttsFailureRecoveryService.playEndingThenHangup(
+                                uuid, record.getId(), ForcedHangupRules.END_WORDS, hangupType);
+                    } else {
+                        killChannel(uuid);
+                    }
                 } else {
                     log.warn("[任务挂断] 未找到 fsUuid recordId={} taskId={}", record.getId(), taskId);
                 }

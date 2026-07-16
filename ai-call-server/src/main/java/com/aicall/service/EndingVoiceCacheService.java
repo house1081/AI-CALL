@@ -51,6 +51,7 @@ public class EndingVoiceCacheService {
     private final LocalPromptWavService localPromptWavService;
     private final AiPromptMapper aiPromptMapper;
     private final FixedPhraseVoiceCatalogService voiceCatalog;
+    private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
 
     private final Map<String, String> textToKey = new LinkedHashMap<>();
 
@@ -61,7 +62,7 @@ public class EndingVoiceCacheService {
     });
 
     @EventListener(ApplicationReadyEvent.class)
-    void warmOnApplicationReady() {
+    void checkEndingCacheOnStartup() {
         if (!aiVoiceProperties.isOpeningVoicePrecacheEnabled()
                 || !aiVoiceProperties.isOpeningVoicePrecacheOnStartup()) {
             return;
@@ -72,13 +73,35 @@ public class EndingVoiceCacheService {
                 if (delay > 0) {
                     Thread.sleep(delay);
                 }
-                ensureActiveEndingCached(false);
+                logStartupCheck();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                log.warn("[结束语缓存] 启动预热失败: {}", e.getMessage());
+                log.warn("[结束语缓存] 启动检查失败: {}", e.getMessage());
             }
         });
+    }
+
+    private void logStartupCheck() {
+        if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
+            return;
+        }
+        AiPrompt active = aiPromptMapper.selectOne(
+                new LambdaQueryWrapper<AiPrompt>().eq(AiPrompt::getIsActive, 1).last("LIMIT 1"));
+        if (active == null) {
+            log.info("[结束语缓存] 启动检查：未配置使用中话术模板");
+            return;
+        }
+        String voiceId = voiceCatalog.resolveActiveVoiceId();
+        int ready = countReadyVoices();
+        int total = voiceCatalog.listAllVoiceIds().size();
+        if (isAnyReady()) {
+            log.info("[结束语缓存] 启动检查：已就绪 voice={} {}/{} 音色",
+                    maskVoice(voiceId), ready, total);
+        } else {
+            log.warn("[结束语缓存] 启动检查：未就绪 voice={} {}/{} 音色，请在管理端手动预生成（启动不自动合成）",
+                    maskVoice(voiceId), ready, total);
+        }
     }
 
     public void regenerateAsync(Integer promptId) {

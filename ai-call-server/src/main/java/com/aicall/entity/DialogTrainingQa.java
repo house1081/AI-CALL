@@ -22,6 +22,10 @@ public class DialogTrainingQa {
     private Integer status;
     private Integer sourceCallId;
     private String remark;
+    /** 主线节点排序（remark=flow:XX 时有效） */
+    private Integer flowOrder;
+    /** 标准答录音（8k 电话 wav 本地路径） */
+    private String answerWavPath;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }

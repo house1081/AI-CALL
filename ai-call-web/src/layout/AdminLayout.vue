@@ -9,8 +9,8 @@
         <el-menu-item index="/price">费率配置</el-menu-item>
         <el-menu-item index="/ai-prompt">AI话术</el-menu-item>
         <el-menu-item index="/ai-model">模型配置</el-menu-item>
-        <el-menu-item index="/prerecord-outbound">智能预录外呼</el-menu-item>
-        <el-menu-item index="/ai-chat-lab">对话训练</el-menu-item>
+        <el-menu-item index="/h5/training">对话训练</el-menu-item>
+        <el-menu-item index="/main-flow">主线流程</el-menu-item>
         <el-menu-item index="/dialog-training">训练知识库</el-menu-item>
         <el-menu-item index="/risk">风控配置</el-menu-item>
         <el-menu-item index="/call-record">通话记录</el-menu-item>

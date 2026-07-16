@@ -35,6 +35,7 @@ public class VoicePlaybackService {
     private final FreeSwitchProperties freeSwitchProperties;
     private final FsWavTransferService fsWavTransferService;
     private final CallSessionRecordService callSessionRecordService;
+    private final DialogTurnRegistry dialogTurnRegistry;
 
     /** 每通道播放互斥，防止多线程叠音/串音 */
     private final ConcurrentHashMap<String, Object> channelPlayLocks = new ConcurrentHashMap<>();
@@ -61,7 +62,11 @@ public class VoicePlaybackService {
                 return false;
             }
             stopChannelPlayback(fsUuid);
-            return playExistingWavInternal(fsUuid, wav);
+            boolean ok = playExistingWavInternal(fsUuid, wav);
+            if (ok) {
+                dialogTurnRegistry.markAiPlaybackStarted(fsUuid, "prerecord-wav");
+            }
+            return ok;
         }
     }
 
@@ -349,6 +354,18 @@ public class VoicePlaybackService {
             }
             return false;
         }
+    }
+
+    /** 通道是否仍在估算的播报窗口内 */
+    public boolean isPlaybackActive(String fsUuid) {
+        if (!StringUtils.hasText(fsUuid)) {
+            return false;
+        }
+        PlaybackWindow w = playbackWindows.get(fsUuid.trim());
+        if (w == null) {
+            return false;
+        }
+        return System.currentTimeMillis() - w.startMs < w.estimatedMs;
     }
 
     /** 播报期间是否允许插嘴检测（保护期内返回 false，保证用户听完整句） */

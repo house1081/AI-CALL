@@ -1,6 +1,7 @@
 package com.aicall.common;
 
 import com.aicall.dto.AiChatMessage;
+import com.aicall.util.AsrTextNormalizer;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
@@ -542,6 +543,17 @@ public final class DialogSlotHelper {
                 || n.equals("hi") || n.equals("hello") || isFillerOnly(t);
     }
 
+    public static boolean shouldIgnoreShortAsrUtterance(String text) {
+        if (!StringUtils.hasText(text) || AsrTextNormalizer.isNumericAmountUtterance(text)) {
+            return false;
+        }
+        if (isGreetingOnly(text)) {
+            return true;
+        }
+        // 「对/好/可以」等短答应进入预录/LLM，仅忽略纯语气词
+        return com.aicall.util.AsrFillerFilter.isPureFillerOnly(text);
+    }
+
     public static boolean shouldBypassRag(String t) {
         return isPunctuationOnly(t) || isGreetingOnly(t);
     }
@@ -573,7 +585,7 @@ public final class DialogSlotHelper {
         if (!StringUtils.hasText(userText) || isExplicitCustomerQuestion(userText)) {
             return false;
         }
-        if (isFollowUpComplaint(userText)) {
+        if (isFollowUpComplaint(userText) || ForcedHangupRules.isAsrCorrectionOrRetraction(userText)) {
             return false;
         }
         if (DialogScriptKeywordMatcher.looksLikeRefuse(userText)
@@ -592,6 +604,36 @@ public final class DialogSlotHelper {
                 || n.equals("嗯") || n.equals("哦") || n.equals("啊");
     }
 
+    /**
+     * FAQ 未命中且用户不是在填主线槽位时，应播产品老师兜底录音（不走主线推进、不走 LLM）。
+     */
+    public static boolean isBeyondKnowledgeBaseScope(String userText) {
+        if (!StringUtils.hasText(userText)) {
+            return false;
+        }
+        if (isExplicitCustomerQuestion(userText)
+                || isFollowUpComplaint(userText)
+                || ForcedHangupRules.shouldSkipSlotOverride(userText)) {
+            return true;
+        }
+        if (shouldPreferMainFlowAdvance(userText)
+                || ForcedHangupRules.isCooperativeAnswer(userText)) {
+            return false;
+        }
+        String u = userText.trim();
+        if (containsQuestionCue(u)) {
+            return true;
+        }
+        return u.length() > 12;
+    }
+
+    private static boolean containsQuestionCue(String text) {
+        return text.contains("?") || text.contains("？") || text.contains("吗") || text.contains("呢")
+                || text.contains("怎么") || text.contains("什么") || text.contains("为什么")
+                || text.contains("哪") || text.contains("谁") || text.contains("是不是")
+                || text.contains("能不能") || text.contains("可不可以") || text.contains("行不行");
+    }
+
     /** 客户在问具体问题（利率/额度/身份/怎么办理等） */
     public static boolean isExplicitCustomerQuestion(String userText) {
         if (!StringUtils.hasText(userText)) {
@@ -606,17 +648,28 @@ public final class DialogSlotHelper {
             return true;
         }
         return u.contains("利率") || u.contains("利息") || u.contains("额度")
+                || u.contains("手续费") || u.contains("居间费") || u.contains("收费") || u.contains("费用")
                 || u.contains("多少钱") || u.contains("多少万") || u.contains("怎么贷")
                 || u.contains("怎么办") || u.contains("怎么办理") || u.contains("多久")
                 || u.contains("在哪") || u.contains("哪里") || u.contains("谁")
+                || u.contains("有没有") || u.contains("机器人") || u.contains("人工")
+                || u.contains("手机号") || u.contains("电话") || u.contains("隐私")
+                || u.contains("影响") || u.contains("什么意思")
                 || (u.contains("多少") && (u.contains("?") || u.contains("？") || u.contains("吗") || u.contains("呢")))
-                || u.contains("为什么") || u.contains("什么意思");
+                || u.contains("为什么")
+                || u.contains("回答") || u.contains("问题");
     }
 
     public static boolean isFollowUpComplaint(String userText) {
-        return userText.contains("说过了") || userText.contains("我就问") || userText.contains("没回答")
-                || userText.contains("答非所问") || userText.contains("你还没") || userText.contains("听不懂")
-                || userText.contains("听不明白") || userText.contains("别绕") || userText.contains("直接说");
+        if (!StringUtils.hasText(userText)) {
+            return false;
+        }
+        String u = userText.trim();
+        return u.contains("说过了") || u.contains("我就问") || u.contains("没回答")
+                || u.contains("你回答") || u.contains("回答我的")
+                || u.contains("答非所问") || u.contains("你还没") || u.contains("听不懂")
+                || u.contains("听不明白") || u.contains("别绕") || u.contains("直接说")
+                || ForcedHangupRules.isAsrCorrectionOrRetraction(u);
     }
 
     public static boolean isFillerOnly(String t) {
