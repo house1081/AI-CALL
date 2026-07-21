@@ -140,20 +140,71 @@ public class DialogScriptPackImportService {
         return r;
     }
 
+    /** 仅同步主线话术文案（按 flow:step upsert） */
+    public Map<String, Object> syncMainFlowFromPack(int kbId) {
+        JsonNode root = loadPack();
+        int synced = 0;
+        int inserted = 0;
+        int updated = 0;
+        JsonNode flows = root.path("mainFlow");
+        if (flows.isArray()) {
+            int order = 10;
+            for (JsonNode n : flows) {
+                String step = text(n, "step");
+                String script = text(n, "script");
+                if (!StringUtils.hasText(step) || !StringUtils.hasText(script)) {
+                    continue;
+                }
+                boolean created = saveOrUpdateFlowRow(kbId, step, text(n, "scene"), script, order);
+                synced++;
+                if (created) {
+                    inserted++;
+                } else {
+                    updated++;
+                }
+                order += 10;
+            }
+        }
+        dialogScriptPackRegistry.reloadFromDb();
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("kbId", kbId);
+        r.put("synced", synced);
+        r.put("inserted", inserted);
+        r.put("updated", updated);
+        r.put("packVersion", text(root, "version"));
+        return r;
+    }
+
     private void saveFlowRow(int kbId, String step, String scene, String script, int flowOrder) {
+        saveOrUpdateFlowRow(kbId, step, scene, script, flowOrder);
+    }
+
+    /** @return true 新建，false 更新已有 */
+    private boolean saveOrUpdateFlowRow(int kbId, String step, String scene, String script, int flowOrder) {
+        String remark = "flow:" + step;
         String question = "[主线" + step + "]" + scene;
-        if (dialogTrainingQaService.existsQuestion(question, kbId)) {
-            return;
+        DialogTrainingQa existing = dialogTrainingQaMapper.selectOne(
+                new LambdaQueryWrapper<DialogTrainingQa>()
+                        .eq(DialogTrainingQa::getKbId, kbId)
+                        .eq(DialogTrainingQa::getRemark, remark)
+                        .last("LIMIT 1"));
+        if (existing != null) {
+            existing.setQuestion(trim(question, 500));
+            existing.setStandardAnswer(trim(script, 2000));
+            existing.setStatus(1);
+            dialogTrainingQaMapper.updateById(existing);
+            return false;
         }
         DialogTrainingQaSaveRequest req = new DialogTrainingQaSaveRequest();
         req.setKbId(kbId);
         req.setQuestion(trim(question, 500));
         req.setStandardAnswer(trim(script, 2000));
         req.setDataType(DialogTrainingDataType.QUALITY_SAMPLE);
-        req.setRemark("flow:" + step);
+        req.setRemark(remark);
         req.setWeight(BigDecimal.valueOf(5.0));
         req.setStatus(1);
         dialogTrainingQaService.saveFlowRow(req, flowOrder);
+        return true;
     }
 
     private void saveRow(int kbId, String question, String answer, int dataType, String remark, BigDecimal weight) {
@@ -224,6 +275,7 @@ public class DialogScriptPackImportService {
     public void importOnStartupIfEmpty() {
         if (!dialogRagProperties.isLoanPackAutoImport()) {
             dialogScriptPackRegistry.reloadFromDb();
+            syncMainFlowOnStartupIfEnabled();
             syncFallbacksOnStartupIfEnabled();
             return;
         }
@@ -232,6 +284,7 @@ public class DialogScriptPackImportService {
                 new LambdaQueryWrapper<DialogTrainingQa>().eq(DialogTrainingQa::getKbId, kbId));
         if (count != null && count > 0) {
             dialogScriptPackRegistry.reloadFromDb();
+            syncMainFlowOnStartupIfEnabled();
             syncFallbacksOnStartupIfEnabled();
             return;
         }
@@ -240,6 +293,18 @@ public class DialogScriptPackImportService {
             log.info("[话术包] 首次启动自动导入完成 {}", r);
         } catch (Exception e) {
             log.warn("[话术包] 自动导入跳过: {}", e.getMessage());
+        }
+    }
+
+    private void syncMainFlowOnStartupIfEnabled() {
+        if (!dialogRagProperties.isLoanPackSyncMainFlowOnStartup()) {
+            return;
+        }
+        try {
+            Map<String, Object> r = syncMainFlowFromPack(DialogCallContextService.DEFAULT_KB_ID);
+            log.info("[话术包] 主线话术同步完成 {}", r);
+        } catch (Exception e) {
+            log.warn("[话术包] 主线话术同步跳过: {}", e.getMessage());
         }
     }
 

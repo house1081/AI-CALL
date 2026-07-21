@@ -109,7 +109,7 @@ ai-voice:
   tts-clone-voice-id: 
   # 定制复刻 target_model / 合成 model；系统音色自动走 cosyvoice-v3-flash
   tts-response-format: audio
-  tts-speech-rate: 1.0
+  tts-speech-rate: 1.08
   tts-pitch-rate: 1.0
   tts-volume: 100
   # CosyVoice Instruct（关闭可减轻 428；对话仍可用语速/音调参数）
@@ -117,16 +117,16 @@ ai-voice:
   tts-instruction: 模仿资深金融信贷顾问语气，语气亲切稳重、自然流畅；介绍产品优势时适当加重语气、放慢语速；语句之间带自然短暂停顿，模拟真人说话的换气感，不要机械朗读，整体语气真诚不推销感过重。
   # 分句顺序 TTS：每句单独合成，句间智能停顿（关闭后整段一次合成，开口更快）
   tts-sentence-sequential-enabled: false
-  tts-smart-pause-enabled: true
-  tts-clause-pause-ms: 200
-  tts-sentence-end-pause-ms: 350
-  tts-inter-sentence-gap-ms: 300
+  tts-smart-pause-enabled: false
+  tts-clause-pause-ms: 80
+  tts-sentence-end-pause-ms: 120
+  tts-inter-sentence-gap-ms: 100
   tts-dynamic-prosody-enabled: false
   # FS 侧背景办公音建议音量 0.2~0.25（在拨号方案/displace 配置）
   background-audio-volume: 0.22
-  playback-peak-ratio: 0.95
-  playback-tail-buffer-ms: 50
-  playback-post-stop-ms: 15
+  playback-peak-ratio: 0.92
+  playback-tail-buffer-ms: 120
+  playback-post-stop-ms: 20
   tts-http-url: ""
   playback-base-url: http://127.0.0.1:8081
   fs-fetch-via-esl: true
@@ -146,10 +146,10 @@ ai-voice:
   fs-builtin-sound: ""
   speak-voice: en|flite
   speak-fallback-voices: en|callie,eng|flite
-  # 单轮播报软上限（AI实时：短句低延迟，SpeakTextLimiter 按句号/逗号截断）
-  max-speak-chars: 24
-  # 流式首句 TTS 触发字数（越小开口越快）
-  stream-tts-first-chunk-chars: 6
+  # 单轮播报软上限（承接+口语提问）
+  max-speak-chars: 36
+  # 流式首句：有标点可更早开播；无标点时最多等这么多字（越低开口越快）
+  stream-tts-first-chunk-chars: 10
   # 整句一次性识别，杜绝流式等待延迟
   asr-mode: sentence
   asr-stream-enabled: false
@@ -160,10 +160,10 @@ ai-voice:
   asr-warm-on-startup: true
   outbound-ready-gate-enabled: true
   outbound-ready-max-wait-ms: 180000
-  dialog-llm-max-tokens: 32
-  # 略低温度，回复更短更稳
-  dialog-llm-temperature: 0.35
-  dialog-llm-top-p: 0.85
+  dialog-llm-max-tokens: 48
+  # 略高温度，口语更自然、少背稿感
+  dialog-llm-temperature: 0.5
+  dialog-llm-top-p: 0.88
   # 关闭蜂鸣/内置音效/speak 机械音回退
   enable-tone-fallback: false
   enable-builtin-sound-fallback: false
@@ -177,51 +177,56 @@ ai-voice:
   asr-http-url: ""
   asr-connect-timeout-ms: 5000
   asr-read-timeout-ms: 12000
-  # ASR：句末静音与 user-silence-before-response-ms 对齐（说完一句再识别）
+  # ASR：抗杂音优先（尖峰噪声勿误触发开麦）；句末静音取档位与本值较大者
   asr-vad-enabled: true
-  asr-vad-silence-ms: 150
-  asr-vad-min-speech-ms: 90
-  asr-vad-poll-ms: 8
-  asr-vad-energy-threshold: 70
-  asr-input-gain: 5.0
+  asr-vad-silence-ms: 350
+  asr-vad-min-speech-ms: 280
+  asr-vad-poll-ms: 16
+  asr-vad-energy-threshold: 180
+  # 增益过高会放大线路杂音；电话小声可再提到 2.5
+  asr-input-gain: 2.0
   asr-enable-itn: true
   # 电话 ASR 不传 context-hint（qwen 易把热词整句误识为客户说话）；浏览器训练同样不传
   asr-context-hint: ""
-  # 客户 5～8s 无有效语音时 AI 主动询问（第1/2/3次：5s/6s/8s）
+  # 客户静音时先多问几遍，避免莫名挂机
   dialog-silence-probe-enabled: true
-  dialog-silence-probe-ms: 6000
-  dialog-silence-probe-min-ms: 5000
-  dialog-silence-probe-max-ms: 8000
-  dialog-silence-probe-max: 5
-  # 句末档位默认：stable=800ms | fast=380ms（任务/DB 可覆盖）
-  silence-profile: fast
+  dialog-silence-probe-ms: 8000
+  dialog-silence-probe-min-ms: 7000
+  dialog-silence-probe-max-ms: 12000
+  dialog-silence-probe-max: 8
+  # 均衡档：句末约 450ms，比 stable 更快开口
+  silence-profile: balanced
   # 用户句末静音 yml 兜底（实际以 silence-profile 为准）
-  user-silence-before-response-ms: 180
+  user-silence-before-response-ms: 450
   asr-record-max-ms: 8000
   asr-max-slice-sec: 4
   asr-language: zh-CN
   asr-model: phone_call
   asr-audio-format: pcm
   dialog-record-chunk-sec: 3
-  dialog-max-call-sec: 300
-  dialog-max-rounds: 30
+  dialog-max-call-sec: 600
+  dialog-max-rounds: 40
   dialog-post-play-wait-ms: 0
-  # AI 播报结束尾音等待（播完已 sync 基线，仅留极短缓冲）
-  turn-based-playback-asr-tail-ms: 40
+  # AI 播报结束尾音等待（播完已同步基线时尽量短）
+  turn-based-playback-asr-tail-ms: 50
   # 播报结束自动对齐 ASR 基线，避免回声误打断
   sync-asr-baseline-after-playback: true
-  sentence-pause-ms: 60
+  sentence-pause-ms: 40
   # false=整段一次 TTS+一次播放，避免分句多次 displace 产生中间空白
   tts-stream-enabled: false
   dialog-enabled: true
   # 每轮都调大模型+带对话历史（与后台「对话训练」一致）；false 时规则话术可绕过模型
   dialog-llm-primary: true
-  dialog-max-history-rounds: 4
-  dialog-llm-async: false
+  # 略减历史，缩短 prompt、压 LLM 尾延迟
+  dialog-max-history-rounds: 6
+  dialog-llm-async: true
   dialog-llm-stream: true
-  # AI实时：LLM 流式首句即 TTS 开播，显著降低开口延迟
+  # LLM 出字即开播：首句约 36 字，多数回合无二次补播，兼顾延迟与连贯
   dialog-llm-stream-tts: true
-  dialog-llm-timeout-sec: 10
+  # 仅约束 LLM 生成（TTS/播报在超时外）；TTFT 负责「多久必须开口」
+  dialog-llm-timeout-sec: 9
+  # 首句开播门控：超时仍未真正开播则立刻主线/槽位兜底，禁止空等
+  dialog-llm-ttft-timeout-sec: 3
   dialog-llm-pool-size: 6
   opening-voice-precache-enabled: true
   # 启动时仅检查开场白/结束语预录是否就绪，不自动 CosyVoice 合成
@@ -241,23 +246,23 @@ ai-voice:
   # 外呼播完异步：智能预录 + 问答缓存命中时不阻塞匹配阶段（下一轮听音前 awaitOutboundPlaybackReady）
   prerecord-playback-async: true
   kb-wav-cache-max-entries: 4096
-  tts-min-interval-ms: 350
-  tts-rate-limit-cooldown-ms: 1500
+  tts-min-interval-ms: 0
+  tts-rate-limit-cooldown-ms: 1200
   tts-rate-limit-retries: 0
   tts-phrase-warm-on-startup: true
   # 外呼就绪门控开启时 TTS 预热在 ASR 之后立即执行；关闭门控时仍可用此延迟错开首通
   opening-voice-precache-delay-ms: 0
   startup-quiet: true
-  playback-barge-in-energy-threshold: 320
-  # 智能预录/知识库录音播报期间允许插嘴打断
-  barge-in-during-turn-based: true
+  playback-barge-in-energy-threshold: 520
+  # 轮次制默认不插嘴，避免杂音把 AI 话切成断续
+  barge-in-during-turn-based: false
   barge-in-enabled: true
-  barge-in-threshold: 7
-  barge-in-hold-ms: 150
-  playback-barge-in-grace-ms: 450
-  playback-barge-in-min-ratio: 0.2
-  # 统一采样率，适配电话线路
-  tts-sample-rate: 16000
+  barge-in-threshold: 18
+  barge-in-hold-ms: 420
+  playback-barge-in-grace-ms: 2200
+  playback-barge-in-min-ratio: 0.85
+  # 电话线路直接 8k，避免 16k→8k 重采样发虚、发糊
+  tts-sample-rate: 8000
 
 # 对话训练 RAG 热更新（方案一：本地向量库即时生效）
 dialog-rag:
@@ -273,10 +278,14 @@ dialog-rag:
   negative-sample-weight: 1.5
   loan-main-flow-enabled: true
   loan-pack-auto-import: true
+  loan-pack-sync-fallbacks-on-startup: true
+  loan-pack-sync-main-flow-on-startup: true
   enrich-index-with-keywords: true
   prerecord-retrieve-top-k: 8
   high-confidence-faq-score: 1.85
   playable-min-score: 0.62
+  # AI 外呼向量检索硬超时，超时跳过不挡开口
+  retrieve-timeout-ms: 800
   # Milvus 扩展（store-type=milvus 时需部署 Milvus 并自行对接）
   milvus-host: 127.0.0.1
   milvus-port: 19530

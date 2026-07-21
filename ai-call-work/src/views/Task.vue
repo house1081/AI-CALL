@@ -58,8 +58,9 @@
         <el-form-item label="句末档位">
           <el-select v-model="form.silenceProfile" clearable placeholder="跟随全局" style="width:100%">
             <el-option label="跟随全局" :value="''" />
+            <el-option label="均衡（450ms）" value="balanced" />
             <el-option label="稳健（800ms）" value="stable" />
-            <el-option label="极速（680ms）" value="fast" />
+            <el-option label="极速（280ms）" value="fast" />
           </el-select>
         </el-form-item>
         <el-form-item v-if="form.dialMode === 1" label="">

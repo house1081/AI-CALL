@@ -50,6 +50,33 @@ public final class TelephonyVadUtil {
         return false;
     }
 
+    /**
+     * 是否存在持续人声：要求连续若干帧超过能量阈值，避免尖峰杂音触发开麦/插嘴。
+     *
+     * @param holdMs 连续语音最短时长（毫秒）
+     */
+    public static boolean hasSustainedSpeech(short[] samples, int sampleRate,
+                                              int energyThreshold, int holdMs) {
+        if (samples == null || samples.length == 0 || sampleRate <= 0) {
+            return false;
+        }
+        int frameSamples = Math.max(80, sampleRate * FRAME_MS / 1000);
+        int needFrames = Math.max(2, holdMs / FRAME_MS);
+        int streak = 0;
+        for (int i = 0; i < samples.length; i += frameSamples) {
+            int end = Math.min(i + frameSamples, samples.length);
+            if (frameRms(samples, i, end) >= energyThreshold) {
+                streak++;
+                if (streak >= needFrames) {
+                    return true;
+                }
+            } else {
+                streak = 0;
+            }
+        }
+        return false;
+    }
+
     private static int frameRms(short[] samples, int from, int to) {
         long sum = 0;
         int n = 0;

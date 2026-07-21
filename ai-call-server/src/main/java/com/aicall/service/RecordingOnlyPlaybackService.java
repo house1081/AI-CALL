@@ -146,7 +146,7 @@ public class RecordingOnlyPlaybackService {
 
     /** 下一轮听音前：等待异步播完；若用户已插嘴则立即返回 */
     public void awaitOutboundPlaybackReady(String uuid) throws InterruptedException {
-        if (!isOutboundPlaybackAsync() || !StringUtils.hasText(uuid)) {
+        if (!shouldAsyncPlayback() || !StringUtils.hasText(uuid)) {
             return;
         }
         if (dialogTurnRegistry.getSpeaker(uuid) == ActiveSpeaker.USER) {

@@ -87,9 +87,9 @@ public class CallUtteranceRecordService {
         int maxMs = Math.max(3000, aiVoiceProperties.getAsrRecordMaxMs());
         int limitSec = Math.max(3, (maxMs + 999) / 1000);
         int silenceMs = voiceRuntimeSettingsService.resolveAsrVadSilenceMs(uuid);
-        int minSpeechMs = Math.max(80, aiVoiceProperties.getAsrVadMinSpeechMs());
+        int minSpeechMs = Math.max(160, aiVoiceProperties.getAsrVadMinSpeechMs());
         int pollMs = Math.max(10, aiVoiceProperties.getAsrVadPollMs());
-        int energy = aiVoiceProperties.getAsrVadEnergyThreshold();
+        int energy = voiceRuntimeSettingsService.resolveAsrVadEnergy(uuid);
 
         prepareRecordChannel(uuid);
         if (!recordViaTransfer(uuid, paths.fsPath(), limitSec)
@@ -110,7 +110,8 @@ public class CallUtteranceRecordService {
             }
             try {
                 short[] samples = TelephonyAsrAudioUtil.readAvailablePcm16ForVad(paths.localPath());
-                if (!speechSeen && TelephonyVadUtil.hasAnySpeech(samples, energy)) {
+                if (!speechSeen && TelephonyVadUtil.hasSustainedSpeech(
+                        samples, TelephonyWavUtil.TELEPHONY_RATE, energy, minSpeechMs)) {
                     speechSeen = true;
                 }
                 if (speechSeen && TelephonyVadUtil.isUtteranceComplete(
@@ -143,9 +144,9 @@ public class CallUtteranceRecordService {
         long mark = callSessionRecordService.getAsrReadOffset(uuid);
         int maxMs = Math.max(2000, aiVoiceProperties.getAsrRecordMaxMs());
         int silenceMs = voiceRuntimeSettingsService.resolveAsrVadSilenceMs(uuid);
-        int minSpeechMs = Math.max(80, aiVoiceProperties.getAsrVadMinSpeechMs());
+        int minSpeechMs = Math.max(160, aiVoiceProperties.getAsrVadMinSpeechMs());
         int pollMs = Math.max(10, aiVoiceProperties.getAsrVadPollMs());
-        int energy = aiVoiceProperties.getAsrVadEnergyThreshold();
+        int energy = voiceRuntimeSettingsService.resolveAsrVadEnergy(uuid);
 
         long start = System.currentTimeMillis();
         boolean speechSeen = false;
@@ -167,7 +168,8 @@ public class CallUtteranceRecordService {
                 if (samples.length == 0) {
                     continue;
                 }
-                if (!speechSeen && TelephonyVadUtil.hasAnySpeech(samples, energy)) {
+                if (!speechSeen && TelephonyVadUtil.hasSustainedSpeech(
+                        samples, TelephonyWavUtil.TELEPHONY_RATE, energy, minSpeechMs)) {
                     speechSeen = true;
                     // 用户说话中：重置句末计时由 isUtteranceComplete 内部 trailing silence 保证
                 }
@@ -443,15 +445,18 @@ public class CallUtteranceRecordService {
             if (sinceMark.length == 0) {
                 return false;
             }
-            int holdMs = aiVoiceProperties.resolveBargeInHoldMs();
-            int tailSamples = Math.max(160, TelephonyWavUtil.TELEPHONY_RATE * holdMs / 1000);
+            int holdMs = Math.max(200, aiVoiceProperties.resolveBargeInHoldMs());
+            // 取更长尾窗，要求尾窗内有「持续」人声，避免尖峰杂音打断 AI
+            int windowMs = Math.max(holdMs * 2, 400);
+            int tailSamples = Math.max(160, TelephonyWavUtil.TELEPHONY_RATE * windowMs / 1000);
             int from = Math.max(0, sinceMark.length - tailSamples);
             short[] tail = java.util.Arrays.copyOfRange(sinceMark, from, sinceMark.length);
             if (tail.length == 0) {
                 return false;
             }
-            int energy = (int) (aiVoiceProperties.resolveBargeInEnergyThreshold() * 1.5);
-            return TelephonyVadUtil.hasAnySpeech(tail, energy);
+            int energy = (int) (aiVoiceProperties.resolveBargeInEnergyThreshold() * 1.6);
+            return TelephonyVadUtil.hasSustainedSpeech(
+                    tail, TelephonyWavUtil.TELEPHONY_RATE, energy, holdMs);
         } catch (Exception e) {
             log.trace("[ASR-VAD] 插嘴检测失败 uuid={}: {}", uuid, e.getMessage());
             return false;

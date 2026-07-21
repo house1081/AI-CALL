@@ -5,6 +5,7 @@ import com.aicall.common.DialogSlotHelper;
 import com.aicall.common.DialogTrainingIntentRouter;
 import com.aicall.common.ForcedHangupRules;
 import com.aicall.common.HangupType;
+import com.aicall.common.MainFlowContextBridge;
 import com.aicall.config.AiVoiceProperties;
 import com.aicall.config.DialogRagProperties;
 import com.aicall.dto.*;
@@ -23,12 +24,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.*;
-import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OllamaChatService {
+
+    private static final java.util.concurrent.ScheduledExecutorService TTFT_WATCH =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "llm-ttft-watch");
+                t.setDaemon(true);
+                return t;
+            });
 
     private final AiModelConfigService aiModelConfigService;
     private final LlmInvokeService llmInvokeService;
@@ -75,9 +83,9 @@ public class OllamaChatService {
     }
 
     /**
-     * @param onSentence 流式模式下每凑满一句完整话术时回调（用于边生成边 TTS）
+     * @param onFirstChunk 流式首句回调；返回 true 表示已真正开播（供 TTFT 门控）
      */
-    public AiChatResponse chat(AiChatRequest req, Consumer<String> onSentence) {
+    public AiChatResponse chat(AiChatRequest req, java.util.function.Predicate<String> onFirstChunk) {
         AiModelConfig modelCfg = aiModelConfigService.requireActive();
         DialogCallContext ctx = req.getCallRecordId() != null
                 ? callContextCacheService.get(req.getCallRecordId())
@@ -112,27 +120,11 @@ public class OllamaChatService {
         }
 
         String lastAi = lastAssistantText(req.getHistory());
-        if (ForcedHangupRules.declinesFundingNeed(req.getUserText(), lastAi)) {
-            log.info("[对话LLM] 客户拒绝资金/贷款需求 recordId={} user={}",
+        if (ForcedHangupRules.isHardNoDisturbance(req.getUserText(), lastAi)) {
+            log.info("[对话LLM] 客户强硬勿扰，礼貌挂机 recordId={} user={}",
                     req.getCallRecordId(),
                     req.getUserText().length() > 24 ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
             return buildFarewellResponse(req, modelCfg, start);
-        }
-
-        if (!aiVoiceProperties.isDialogLlmPrimary()) {
-            String quick = quickReplyForUser(req);
-            if (quick != null) {
-                return buildQuickReply(req, quick, modelCfg, start);
-            }
-        } else if (req.getCallRecordId() != null && DialogSlotHelper.isStatingLoanAmount(req.getUserText())) {
-            String amountSlot = quickReplyForUser(req);
-            if (StringUtils.hasText(amountSlot)) {
-                log.info("[对话LLM] 外呼额度槽位优先 recordId={} user={}",
-                        req.getCallRecordId(),
-                        req.getUserText().length() > 24
-                                ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
-                return buildQuickReply(req, amountSlot, modelCfg, start);
-            }
         }
 
         HangupDecision pre = HangupDecision.none(0, 0);
@@ -152,23 +144,35 @@ public class OllamaChatService {
             }
         }
 
+        // AI 外呼：每轮 LLM + 完整上下文；主线只作引导，禁止硬播短路
+        if (aiVoiceProperties.isDialogLlmPrimary() && req.getCallRecordId() != null) {
+            return chatAiOutboundContextual(req, onFirstChunk, modelCfg, prompt, kbId, start, lastAi, pre);
+        }
+
+        // 以下为训练 / 非 LLM-primary 兼容路径
+        if (ForcedHangupRules.declinesFundingNeed(req.getUserText(), lastAi)) {
+            log.info("[对话LLM] 客户拒绝资金/贷款需求 recordId={} user={}",
+                    req.getCallRecordId(),
+                    req.getUserText().length() > 24 ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
+            return buildFarewellResponse(req, modelCfg, start);
+        }
+
+        if (!aiVoiceProperties.isDialogLlmPrimary()) {
+            String quick = quickReplyForUser(req);
+            if (quick != null) {
+                return buildQuickReply(req, quick, modelCfg, start);
+            }
+        }
+
         if (req.getCallRecordId() != null && DialogSlotHelper.shouldBypassRag(req.getUserText())) {
             dialogMainFlowService.ensureInit(req.getCallRecordId(), kbId);
             if (dialogMainFlowService.isEnabled(kbId)) {
                 String mainLine = dialogMainFlowService.nextMainLineAfterUser(
                         req.getCallRecordId(), req.getUserText());
                 if (StringUtils.hasText(mainLine)) {
-                    log.info("[主线] 问候/语气词接主线 recordId={} kb={} user={}",
-                            req.getCallRecordId(), kbId,
-                            req.getUserText().length() > 24
-                                    ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
-                    return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
+                    return buildMainFlowTurnReply(req, mainLine, modelCfg, start);
                 }
             }
-            log.info("[对话LLM] 问候/语气词不走RAG recordId={} user={}",
-                    req.getCallRecordId(),
-                    req.getUserText().length() > 24
-                            ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
             return buildQuickReply(req, trimReply(ForcedHangupRules.hearingFallbackReply()),
                     modelCfg, start);
         }
@@ -178,10 +182,6 @@ public class OllamaChatService {
             DialogRagRetrieveResult keywordHit = dialogRagRetrievalService.tryKeywordDirectAnswer(
                     req.getUserText(), kbId);
             if (keywordHit.isDirectAnswer() && StringUtils.hasText(keywordHit.getDirectAnswerText())) {
-                log.info("[RAG] 公司/地址关键词直出 recordId={} kb={} user={}",
-                        req.getCallRecordId(), kbId,
-                        req.getUserText().length() > 24
-                                ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
                 return buildQuickReply(req, trimReply(keywordHit.getDirectAnswerText()),
                         modelCfg, start, true);
             }
@@ -189,37 +189,7 @@ public class OllamaChatService {
 
         String intentQuick = fallbackForUserUtterance(req.getUserText());
         if (StringUtils.hasText(intentQuick)) {
-            log.info("[对话LLM] 身份/服务快答 recordId={} trainSession={} user={}",
-                    req.getCallRecordId(), req.getTrainSessionId(),
-                    req.getUserText().length() > 24
-                            ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
             return buildQuickReply(req, trimReply(intentQuick), modelCfg, start, true);
-        }
-
-        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
-                && DialogSlotHelper.shouldPreferMainFlowAdvance(req.getUserText())) {
-            String mainLine = dialogMainFlowService.nextMainLineAfterUser(
-                    req.getCallRecordId(), req.getUserText(), lastAi);
-            if (StringUtils.hasText(mainLine)) {
-                log.info("[主线] 快答 recordId={} kb={} step={} user={}",
-                        req.getCallRecordId(), kbId, dialogMainFlowService.currentStep(req.getCallRecordId()),
-                        req.getUserText().length() > 16 ? req.getUserText().substring(0, 16) + "…" : req.getUserText());
-                return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
-            }
-        }
-
-        if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)) {
-            String step = dialogMainFlowService.currentStep(req.getCallRecordId());
-            if (DialogTrainingIntentRouter.shouldDeferKeywordFaqToMainFlow(req.getUserText(), lastAi, step)) {
-                String mainLine = dialogMainFlowService.nextMainLineAfterUser(
-                        req.getCallRecordId(), req.getUserText(), lastAi);
-                if (StringUtils.hasText(mainLine)) {
-                    log.info("[主线] 语境槽位优先 recordId={} kb={} step={} user={}",
-                            req.getCallRecordId(), kbId, step,
-                            req.getUserText().length() > 16 ? req.getUserText().substring(0, 16) + "…" : req.getUserText());
-                    return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
-                }
-            }
         }
 
         DialogRagRetrieveResult rag = null;
@@ -230,52 +200,212 @@ public class OllamaChatService {
                 return ragReply;
             }
             if (rag.isNoMatchFallback() && !dialogMainFlowService.isEnabled(kbId)) {
-                log.info("[RAG] 无匹配严格兜底 recordId={} kb={} ms={}",
-                        req.getCallRecordId(), kbId, rag.getRetrieveMs());
                 return buildQuickReply(req, trimReply(dialogRagRetrievalService.noMatchFallbackText()),
                         modelCfg, start, false);
-            }
-        }
-
-        if (req.getCallRecordId() != null) {
-            String fallback = fallbackForUserUtterance(req.getUserText());
-            if (fallback != null) {
-                log.info("[对话LLM] 外呼固定快答 recordId={} user={}",
-                        req.getCallRecordId(),
-                        req.getUserText().length() > 24
-                                ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
-                return buildQuickReply(req, fallback, modelCfg, start);
-            }
-            String instant = quickReplyForUser(req);
-            if (instant != null && preferInstantSlotReply(req.getUserText())) {
-                log.info("[对话LLM] 外呼槽位快答 recordId={} user={}",
-                        req.getCallRecordId(),
-                        req.getUserText().length() > 24
-                                ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
-                return buildQuickReply(req, instant, modelCfg, start);
             }
         }
 
         if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
                 && !DialogSlotHelper.prefersContextualLlmReply(req.getUserText(),
                 rag != null && rag.isHasPositiveMatch())) {
-            String mainLine = dialogMainFlowService.nextMainLineAfterUser(req.getCallRecordId(), req.getUserText());
+            String mainLine = dialogMainFlowService.nextMainLineAfterUser(
+                    req.getCallRecordId(), req.getUserText(), lastAi);
             if (StringUtils.hasText(mainLine)) {
-                log.info("[主线] 循序播报 recordId={} kb={} step={} user={}",
-                        req.getCallRecordId(), kbId, dialogMainFlowService.currentStep(req.getCallRecordId()),
-                        req.getUserText().length() > 24 ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
-                return buildQuickReply(req, trimReply(mainLine), modelCfg, start, false);
+                return buildMainFlowTurnReply(req, mainLine, modelCfg, start);
             }
-        } else if (req.getCallRecordId() != null && dialogMainFlowService.isEnabled(kbId)
-                && DialogSlotHelper.prefersContextualLlmReply(req.getUserText(),
-                rag != null && rag.isHasPositiveMatch())) {
-            log.info("[主线] 客户提问/FAQ命中，跳过主线推进 recordId={} user={}",
-                    req.getCallRecordId(),
-                    req.getUserText().length() > 24 ? req.getUserText().substring(0, 24) + "..." : req.getUserText());
         }
 
+        return invokeLlmTurn(req, onFirstChunk, modelCfg, prompt, rag, start, pre, null, false);
+    }
+
+    /**
+     * AI 实时外呼：LLM 为主，主线 peek 引导；应答成功后再 commit 推进。
+     */
+    private AiChatResponse chatAiOutboundContextual(AiChatRequest req, java.util.function.Predicate<String> onFirstChunk,
+                                                    AiModelConfig modelCfg, AiPrompt prompt, int kbId,
+                                                    long start, String lastAi, HangupDecision pre) {
+        dialogMainFlowService.ensureInit(req.getCallRecordId(), kbId);
+
+        // 含糊：澄清，不推进主线、不乱答
+        if (ForcedHangupRules.isVagueOrUnclearTranscript(req.getUserText())
+                && !ForcedHangupRules.isCooperativeAnswer(req.getUserText())
+                && !ForcedHangupRules.hasBusinessIntent(req.getUserText())
+                && !DialogSlotHelper.isStatingLoanAmount(req.getUserText())
+                && !ForcedHangupRules.isIdentityInquiry(req.getUserText())
+                && !ForcedHangupRules.isHearingIssue(req.getUserText())) {
+            String clarify = ForcedHangupRules.unclearClarifyReply(lastAi);
+            String current = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+            if (StringUtils.hasText(current) && current.length() <= 40) {
+                clarify = "不好意思没听清，" + stripLeadingWeakAck(current);
+            }
+            log.info("[对话LLM] AI外呼含糊澄清 recordId={} user={}", req.getCallRecordId(), req.getUserText());
+            return buildQuickReply(req, SpeakTextLimiter.limit(clarify, speakBudget()), modelCfg, start, false);
+        }
+
+        // 身份/听不清/嫌慢：极短快答（低延迟），不抢主线推进
+        if (ForcedHangupRules.isHearingIssue(req.getUserText())
+                || ForcedHangupRules.isIdentityInquiry(req.getUserText())
+                || ForcedHangupRules.isServiceInquiry(req.getUserText())
+                || ForcedHangupRules.isClarificationQuestion(req.getUserText())
+                || ForcedHangupRules.isLatencyComplaint(req.getUserText())) {
+            String quick = fallbackForUserUtterance(req.getUserText());
+            if (StringUtils.hasText(quick)) {
+                String resume = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+                String body = quick;
+                if (StringUtils.hasText(resume) && !quick.contains("？") && resume.contains("？")
+                        && !ForcedHangupRules.isLatencyComplaint(req.getUserText())) {
+                    body = SpeakTextLimiter.limit(quick + " " + stripLeadingWeakAck(resume), speakBudget());
+                }
+                return buildQuickReply(req, body, modelCfg, start, true);
+            }
+        }
+
+        // FAQ 关键词直出（征信/利率等）：毫秒级开口，禁止再走慢向量嵌入+LLM
+        if (dialogRagProperties.isEnabled()) {
+            DialogRagRetrieveResult keywordHit = dialogRagRetrievalService.tryKeywordDirectAnswer(
+                    req.getUserText(), kbId);
+            if (keywordHit.isDirectAnswer() && StringUtils.hasText(keywordHit.getDirectAnswerText())) {
+                String ans = OralScriptNormalizer.normalize(keywordHit.getDirectAnswerText().trim());
+                String resume = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+                if (StringUtils.hasText(resume) && !ans.contains("？") && resume.contains("？")) {
+                    ans = SpeakTextLimiter.limit(ans + " " + stripLeadingWeakAck(resume), speakBudget());
+                } else {
+                    ans = SpeakTextLimiter.limit(ans, speakBudget());
+                }
+                log.info("[对话LLM] AI外呼关键词直出 recordId={} ruleId={} replyLen={}",
+                        req.getCallRecordId(), keywordHit.getKeywordRuleId(),
+                        ans != null ? ans.length() : 0);
+                return buildQuickReply(req, ans, modelCfg, start, true);
+            }
+        }
+
+        boolean customerQuestion = DialogSlotHelper.prefersContextualLlmReply(req.getUserText(), false)
+                || DialogSlotHelper.isExplicitCustomerQuestion(req.getUserText());
+
+        // 额度/短答/主线推进：槽位快路径，避开 5~11s LLM 空等导致「没说话就挂」
+        if (!customerQuestion
+                && dialogMainFlowService.isEnabled(kbId)
+                && (DialogSlotHelper.isStatingLoanAmount(req.getUserText())
+                || DialogSlotHelper.shouldPreferMainFlowAdvance(req.getUserText())
+                || ForcedHangupRules.isCooperativeAnswer(req.getUserText()))) {
+            AiChatResponse fast = tryOutboundSlotMainFlowFastPath(req, modelCfg, kbId, start, lastAi);
+            if (fast != null) {
+                return fast;
+            }
+        }
+
+        String peekGuide = null;
+        if (dialogMainFlowService.isEnabled(kbId)) {
+            if (customerQuestion) {
+                peekGuide = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+                log.info("[主线] AI外呼客户提问，peek 当前题引导 recordId={} step={}",
+                        req.getCallRecordId(), dialogMainFlowService.currentStep(req.getCallRecordId()));
+            } else {
+                peekGuide = dialogMainFlowService.peekNextScript(
+                        req.getCallRecordId(), req.getUserText(), lastAi);
+                if (!StringUtils.hasText(peekGuide)) {
+                    peekGuide = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+                }
+                log.info("[主线] AI外呼 peek 引导 recordId={} step={} guideLen={}",
+                        req.getCallRecordId(), dialogMainFlowService.currentStep(req.getCallRecordId()),
+                        peekGuide != null ? peekGuide.length() : 0);
+            }
+        }
+
+        DialogRagRetrieveResult rag = null;
+        if (dialogRagProperties.isEnabled()) {
+            rag = retrieveOutboundBounded(req.getUserText(), kbId);
+            // 外呼：向量命中只注入 LLM；关键词已在上方直出
+        }
+
+        AiChatResponse llmResp = invokeLlmTurn(req, onFirstChunk, modelCfg, prompt, rag, start, pre,
+                peekGuide, true);
+        if (llmResp != null && StringUtils.hasText(llmResp.getReply())
+                && !Boolean.TRUE.equals(llmResp.getShouldHangup())
+                && dialogMainFlowService.isEnabled(kbId)
+                && !customerQuestion
+                && !ForcedHangupRules.isAsrCorrectionOrRetraction(req.getUserText())) {
+            dialogMainFlowService.commitAdvanceAfterReply(
+                    req.getCallRecordId(), req.getUserText(), lastAi);
+            log.info("[主线] AI外呼 commit 推进 recordId={} step={}",
+                    req.getCallRecordId(), dialogMainFlowService.currentStep(req.getCallRecordId()));
+        }
+        return llmResp;
+    }
+
+    /**
+     * 报额度/短应等：直接槽位或主线桥接，毫秒级开口。
+     */
+    private AiChatResponse tryOutboundSlotMainFlowFastPath(AiChatRequest req, AiModelConfig modelCfg,
+                                                           int kbId, long start, String lastAi) {
+        DialogSlotHelper.Slots slots = DialogSlotHelper.extract(req.getHistory(), req.getUserText());
+        String slotReply = DialogSlotHelper.nextReply(slots, req.getUserText(), req.getHistory());
+        String peek = dialogMainFlowService.peekNextScript(
+                req.getCallRecordId(), req.getUserText(), lastAi);
+        if (!StringUtils.hasText(peek)) {
+            peek = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+        }
+        String body = null;
+        if (StringUtils.hasText(slotReply) && slotReply.length() >= 8
+                && !isWeakAckOnlyReply(slotReply)) {
+            body = slotReply;
+        } else if (StringUtils.hasText(peek)) {
+            body = MainFlowContextBridge.bridge(req.getUserText(), lastAi, peek);
+        }
+        if (!StringUtils.hasText(body) || isWeakAckOnlyReply(body)) {
+            return null;
+        }
+        body = SpeakTextLimiter.limit(OralScriptNormalizer.normalize(body.trim()), speakBudget());
+        if (!StringUtils.hasText(body) || body.length() < 6) {
+            return null;
+        }
+        dialogMainFlowService.commitAdvanceAfterReply(
+                req.getCallRecordId(), req.getUserText(), lastAi);
+        log.info("[对话LLM] 槽位/主线快路径 recordId={} user={} replyLen={} step={}",
+                req.getCallRecordId(),
+                req.getUserText().length() > 20 ? req.getUserText().substring(0, 20) + "…" : req.getUserText(),
+                body.length(),
+                dialogMainFlowService.currentStep(req.getCallRecordId()));
+        return buildQuickReply(req, body, modelCfg, start, false);
+    }
+
+    /** 外呼向量检索：硬超时跳过，避免嵌入接口卡死导致客户空等挂机 */
+    private DialogRagRetrieveResult retrieveOutboundBounded(String userText, int kbId) {
+        int timeoutMs = Math.max(200, Math.min(3000, dialogRagProperties.getRetrieveTimeoutMs()));
+        try {
+            return java.util.concurrent.CompletableFuture
+                    .supplyAsync(() -> dialogRagRetrievalService.retrieve(userText, kbId))
+                    .orTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .join();
+        } catch (Exception e) {
+            Throwable cause = e instanceof java.util.concurrent.CompletionException && e.getCause() != null
+                    ? e.getCause() : e;
+            log.warn("[RAG] 外呼检索超时/失败，跳过注入 timeoutMs={} reason={}",
+                    timeoutMs, cause.getMessage());
+            DialogRagRetrieveResult empty = new DialogRagRetrieveResult();
+            empty.setRetrieveMs(timeoutMs);
+            return empty;
+        }
+    }
+
+    private AiChatResponse invokeLlmTurn(AiChatRequest req, java.util.function.Predicate<String> onFirstChunk,
+                                         AiModelConfig modelCfg, AiPrompt prompt,
+                                         DialogRagRetrieveResult rag, long start, HangupDecision pre,
+                                         String mainFlowGuide, boolean aiOutbound) {
         String system = buildSystemPrompt(prompt, pre.getElapsedSeconds(), req.getHistory(),
                 req.getUserText(), rag, req.getCallRecordId());
+        if (StringUtils.hasText(mainFlowGuide)) {
+            if (aiOutbound) {
+                system = system + "\n\n【主线引导】若客户在回答上一问，先用半句口语接住，再自然问出意思相同的话："
+                        + "「" + mainFlowGuide.trim() + "」。"
+                        + "可以把书面说法改口语，例如「请问需要多少资金」→「那您大概要多少资金」；"
+                        + "若客户在提问，先答提问，再酌情接回。禁止无视客户本句硬背原文；"
+                        + "听不清就换说法重问，不要编造利率或放款承诺。";
+            } else {
+                system = system + "\n\n【主线待办】答完客户本句后，用半句自然衔接到主线问题：「"
+                        + mainFlowGuide.trim() + "」。";
+            }
+        }
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", system));
         appendHistory(messages, req.getHistory(), modelCfg);
@@ -285,33 +415,72 @@ public class OllamaChatService {
         int histSize = req.getHistory() != null ? req.getHistory().size() : 0;
         boolean stream = aiVoiceProperties.isDialogLlmStream();
         long llmStart = System.currentTimeMillis();
-        log.info("[对话LLM] {}调用大模型 recordId={} historyMsgs={} maxTokens={} user={}",
+        log.info("[对话LLM] {}调用大模型 recordId={} historyMsgs={} maxTokens={} outbound={} user={}",
                 stream ? "流式" : "",
-                req.getCallRecordId(), histSize, llmCfg.getMaxTokens(),
+                req.getCallRecordId(), histSize, llmCfg.getMaxTokens(), aiOutbound,
                 req.getUserText().length() > 40 ? req.getUserText().substring(0, 40) + "..." : req.getUserText());
 
         String rawReply;
+        java.util.concurrent.ScheduledFuture<?> ttftWatch = null;
         try {
             if (stream) {
                 LlmStreamingSentenceBuffer sentenceBuf = new LlmStreamingSentenceBuffer(
                         aiVoiceProperties.getMaxSpeakChars(),
                         aiVoiceProperties.getStreamTtsFirstChunkChars());
-                rawReply = llmInvokeService.chatStreaming(messages, llmCfg, delta -> {
-                    for (String sentence : sentenceBuf.feed(delta)) {
-                        if (onSentence != null) {
-                            onSentence.accept(sentence);
+                AtomicBoolean firstSentenceEmitted = new AtomicBoolean(false);
+                int ttftSec = Math.max(0, Math.min(30, aiVoiceProperties.getDialogLlmTtftTimeoutSec()));
+                Thread worker = Thread.currentThread();
+                if (ttftSec > 0) {
+                    ttftWatch = TTFT_WATCH.schedule(() -> {
+                        if (!firstSentenceEmitted.get()) {
+                            log.warn("[对话LLM] TTFT门控中断 recordId={} ttftSec={}",
+                                    req.getCallRecordId(), ttftSec);
+                            worker.interrupt();
                         }
+                    }, ttftSec, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                rawReply = llmInvokeService.chatStreaming(messages, llmCfg, delta -> {
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new BizException("大模型首句超时 " + ttftSec + "s");
+                    }
+                    for (String sentence : sentenceBuf.feed(delta)) {
+                        if (onFirstChunk != null && onFirstChunk.test(sentence)) {
+                            firstSentenceEmitted.set(true);
+                        }
+                    }
+                    if (ttftSec > 0 && !firstSentenceEmitted.get()
+                            && System.currentTimeMillis() - llmStart > ttftSec * 1000L) {
+                        String forced = sentenceBuf.flushRemainder();
+                        if (StringUtils.hasText(forced) && onFirstChunk != null
+                                && onFirstChunk.test(forced)) {
+                            firstSentenceEmitted.set(true);
+                            log.info("[对话LLM] TTFT超时强制开播 recordId={} len={} ttftSec={}",
+                                    req.getCallRecordId(), forced.length(), ttftSec);
+                            return;
+                        }
+                        // 仍无真正开播：立刻走主线/槽位兜底，禁止继续空等
+                        throw new BizException("大模型首句超时 " + ttftSec + "s");
                     }
                 });
                 String tail = sentenceBuf.flushRemainder();
-                if (onSentence != null && StringUtils.hasText(tail)) {
-                    onSentence.accept(tail);
+                if (onFirstChunk != null && StringUtils.hasText(tail)) {
+                    if (onFirstChunk.test(tail)) {
+                        firstSentenceEmitted.set(true);
+                    }
                 }
             } else {
                 rawReply = llmInvokeService.chat(messages, llmCfg);
             }
         } catch (Exception e) {
             log.warn("[对话LLM] 调用失败 recordId={}: {}", req.getCallRecordId(), e.getMessage());
+            if (req.getCallRecordId() != null && aiOutbound && StringUtils.hasText(mainFlowGuide)) {
+                String bridged = MainFlowContextBridge.bridge(
+                        req.getUserText(), lastAssistantText(req.getHistory()), mainFlowGuide);
+                dialogMainFlowService.commitAdvanceAfterReply(
+                        req.getCallRecordId(), req.getUserText(), lastAssistantText(req.getHistory()));
+                return buildQuickReply(req, SpeakTextLimiter.limit(bridged, speakBudget()),
+                        modelCfg, start, false);
+            }
             if (req.getCallRecordId() != null) {
                 return buildQuickReply(req, resolveLiveCallFallbackText(req), modelCfg, start);
             }
@@ -319,12 +488,24 @@ public class OllamaChatService {
                 throw be;
             }
             throw new BizException("大模型调用失败: " + e.getMessage());
+        } finally {
+            if (ttftWatch != null) {
+                ttftWatch.cancel(false);
+            }
+            // 清除门控留下的中断标记，避免污染后续 TTS
+            //noinspection ResultOfMethodCallIgnored
+            Thread.interrupted();
         }
         log.info("[对话LLM] 完成 recordId={} 耗时{}ms 字数={}",
                 req.getCallRecordId(), System.currentTimeMillis() - llmStart,
                 rawReply != null ? rawReply.length() : 0);
         String cleaned = forcedHangupService.stripHangupMarkers(rawReply);
-        cleaned = polishReply(req, cleaned);
+        // 流式 TTS 已边生成边播：禁止 diversify/槽位改写整句，否则与已播前缀错位触发整段重播
+        if (onFirstChunk != null && aiOutbound) {
+            cleaned = polishReplyPreserveStream(req, cleaned);
+        } else {
+            cleaned = polishReply(req, cleaned);
+        }
         cleaned = ensureSubstantiveReply(req, cleaned);
         if (req.getCallRecordId() != null || StringUtils.hasText(req.getTrainSessionId())) {
             forcedHangupService.afterAiReply(req.getCallRecordId(), req.getTrainSessionId(), cleaned);
@@ -332,23 +513,27 @@ public class OllamaChatService {
 
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(req.getHistory(), req.getUserText());
         boolean slotsSayEnd = DialogSlotHelper.shouldEndCall(req.getUserText(), slots, req.getHistory());
-        boolean endCall = !aiVoiceProperties.isDialogLlmPrimary() && slotsSayEnd;
-        String finalReply = StringUtils.hasText(cleaned) ? trimReply(cleaned) : "";
+        // AI 外呼：槽位齐了也不自动挂机，除非客户明确告别（上层已处理）
+        boolean endCall = !aiOutbound && !aiVoiceProperties.isDialogLlmPrimary() && slotsSayEnd;
+        int budget = speakBudget();
+        String finalReply = StringUtils.hasText(cleaned) ? SpeakTextLimiter.limit(cleaned, budget) : "";
         if (!StringUtils.hasText(finalReply) && req.getCallRecordId() != null) {
-            finalReply = trimReply(ForcedHangupRules.knowledgeNoMatchFallbackReply());
-            log.info("[LLM] 应答为空，使用知识库无匹配兜底 recordId={}", req.getCallRecordId());
-        }
-        if (endCall) {
-            finalReply = DialogSlotHelper.goodbyeReply(req.getHistory());
-        } else if (aiVoiceProperties.isDialogLlmPrimary() && slotsSayEnd && !StringUtils.hasText(finalReply)) {
-            finalReply = DialogSlotHelper.goodbyeReply(req.getHistory());
+            if (StringUtils.hasText(mainFlowGuide)) {
+                finalReply = SpeakTextLimiter.limit(
+                        MainFlowContextBridge.bridge(req.getUserText(),
+                                lastAssistantText(req.getHistory()), mainFlowGuide),
+                        budget);
+            } else {
+                finalReply = SpeakTextLimiter.limit(
+                        ForcedHangupRules.knowledgeNoMatchFallbackReply(), budget);
+            }
+            log.info("[LLM] 应答为空，使用兜底 recordId={}", req.getCallRecordId());
         }
 
         AiChatResponse r = new AiChatResponse();
         r.setReply(finalReply);
-        boolean hangup = endCall || (aiVoiceProperties.isDialogLlmPrimary() && slotsSayEnd);
-        r.setShouldHangup(hangup);
-        if (hangup) {
+        r.setShouldHangup(endCall);
+        if (endCall) {
             r.setEndWords(finalReply);
             r.setHangupTriggered(true);
         }
@@ -358,6 +543,17 @@ public class OllamaChatService {
         r.setLatencyMs(System.currentTimeMillis() - start);
         fillHangupMeta(r, req, pre);
         return r;
+    }
+
+    private int speakBudget() {
+        return Math.max(aiVoiceProperties.getMaxSpeakChars(), 40);
+    }
+
+    private static String stripLeadingWeakAck(String script) {
+        if (!StringUtils.hasText(script)) {
+            return script;
+        }
+        return script.trim().replaceFirst("^(好的[，,]?|嗯[嗯]?[，,]?|哦[，,]?)+", "").trim();
     }
 
     private AiChatResponse buildHangupResponse(HangupDecision decision, long start, AiModelConfig modelCfg) {
@@ -398,6 +594,9 @@ public class OllamaChatService {
         if (ForcedHangupRules.isClarificationQuestion(userText)) {
             return ForcedHangupRules.clarificationFallbackReply();
         }
+        if (ForcedHangupRules.isLatencyComplaint(userText)) {
+            return ForcedHangupRules.latencyComplaintReply();
+        }
         return null;
     }
 
@@ -428,6 +627,15 @@ public class OllamaChatService {
         String user = req.getUserText().trim();
         String r = reply != null ? reply.trim() : "";
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(req.getHistory(), req.getUserText());
+
+        // 客户已报额度/时间，禁止只回「行/好」——必须带下一问
+        if (isWeakAckOnlyReply(r) && slots != null && (slots.hasAmount || slots.hasTime)) {
+            String alt = DialogSlotHelper.nextReply(slots, user, req.getHistory());
+            if (StringUtils.hasText(alt)) {
+                log.info("[LLM] 弱承接替换为槽位追问 recordId={} raw={}", req.getCallRecordId(), r);
+                return alt;
+            }
+        }
 
         if (ForcedHangupRules.isGenericProductIntro(r)
                 && (slots.hasAmount || slots.hasTime || slots.hasPurpose)) {
@@ -470,8 +678,27 @@ public class OllamaChatService {
         return DialogSlotHelper.humanize(ForcedHangupRules.continueDialogReply(user));
     }
 
+    private static boolean isWeakAckOnlyReply(String reply) {
+        if (!StringUtils.hasText(reply)) {
+            return true;
+        }
+        String n = reply.trim().replaceAll("[\\s，,。.!！?？~～、；;]+", "");
+        if (n.isEmpty()) {
+            return true;
+        }
+        if (n.length() > 6) {
+            return false;
+        }
+        return n.equals("行") || n.equals("好") || n.equals("好的") || n.equals("嗯") || n.equals("嗯嗯")
+                || n.equals("哦") || n.equals("明白") || n.equals("了解") || n.equals("记下了")
+                || n.equals("好嘞") || n.equals("可以") || n.equals("收到") || n.equalsIgnoreCase("ok");
+    }
+
     private static boolean isEchoOnlyReply(String user, String reply, DialogSlotHelper.Slots slots) {
         if (!StringUtils.hasText(reply)) {
+            return true;
+        }
+        if (isWeakAckOnlyReply(reply)) {
             return true;
         }
         if (ForcedHangupRules.isGenericProductIntro(reply)) {
@@ -487,7 +714,8 @@ public class OllamaChatService {
         String u = user.replaceAll("[\\s，,。.!！?？~～]+", "");
         String r = reply.replaceAll("[\\s，,。.!！?？~～]+", "");
         if (r.length() <= 12) {
-            return !(slots != null && (slots.hasAmount || slots.hasTime));
+            // 短句且已有额度/时间：仍可能是「行」类，上面已拦；其它短实质答复放行
+            return false;
         }
         if (u.contains(r) && r.length() >= u.length() * 0.45) {
             return true;
@@ -539,6 +767,21 @@ public class OllamaChatService {
         }
         String alt = DialogSlotHelper.nextReply(slots, user, req.getHistory());
         return StringUtils.hasText(alt) ? trimFragmentedReply(alt) : trimFragmentedReply(polished);
+    }
+
+    /**
+     * 流式 TTS 路径轻量润色：只做告别/额度纠错与截断，避免 diversify 改写导致首句重播。
+     */
+    private String polishReplyPreserveStream(AiChatRequest req, String reply) {
+        String user = req.getUserText() != null ? req.getUserText().trim() : "";
+        if (ForcedHangupRules.isUserFarewell(user)) {
+            return DialogSlotHelper.goodbyeReply(req.getHistory());
+        }
+        String polished = StringUtils.hasText(reply) ? reply : "";
+        DialogSlotHelper.Slots slots = DialogSlotHelper.extract(req.getHistory(), req.getUserText());
+        polished = DialogSlotHelper.correctUnclearReplyWhenAmountKnown(
+                polished, slots, user, req.getHistory());
+        return trimFragmentedReply(polished);
     }
 
     /** 避免 AI 一次说多个问题或过长碎句；AI 实时优先只保留第一句 */
@@ -598,6 +841,26 @@ public class OllamaChatService {
         String quick = quickReplyForUser(req);
         if (StringUtils.hasText(quick)) {
             return quick;
+        }
+        // 超时/失败：优先主线当前题承接，避免干播「系统无法解答」
+        if (req.getCallRecordId() != null && aiVoiceProperties.isDialogLlmPrimary()) {
+            try {
+                DialogCallContext ctx = dialogCallContextService.resolve(req.getCallRecordId());
+                int kbId = ctx.hasKb() ? ctx.getKbId() : DialogCallContextService.DEFAULT_KB_ID;
+                if (dialogMainFlowService.isEnabled(kbId)) {
+                    dialogMainFlowService.ensureInit(req.getCallRecordId(), kbId);
+                    String guide = dialogMainFlowService.resumeAfterFallback(req.getCallRecordId());
+                    if (StringUtils.hasText(guide)) {
+                        String bridged = MainFlowContextBridge.bridge(
+                                req.getUserText(), lastAssistantText(req.getHistory()), guide);
+                        log.info("[对话LLM] 超时主线兜底 recordId={} guideLen={}",
+                                req.getCallRecordId(), guide.length());
+                        return SpeakTextLimiter.limit(bridged, speakBudget());
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("[对话LLM] 主线兜底跳过 recordId={}: {}", req.getCallRecordId(), e.getMessage());
+            }
         }
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(req.getHistory(), req.getUserText());
         String slot = DialogSlotHelper.nextReply(slots, req.getUserText(), req.getHistory());
@@ -708,6 +971,77 @@ public class OllamaChatService {
         return "";
     }
 
+    /**
+     * 主线推进：先按客户答案做规则承接；内容较具体时再让 LLM 润色一句（失败则回落规则版）。
+     */
+    private AiChatResponse buildMainFlowTurnReply(AiChatRequest req, String mainLine,
+                                                  AiModelConfig modelCfg, long start) {
+        String lastAi = lastAssistantText(req.getHistory());
+        String bridged = MainFlowContextBridge.bridge(req.getUserText(), lastAi, mainLine);
+        int speakChars = Math.max(aiVoiceProperties.getMaxSpeakChars(), 40);
+        if (aiVoiceProperties.isDialogLlmPrimary()
+                && MainFlowContextBridge.shouldLlmPolish(req.getUserText())) {
+            try {
+                String polished = polishMainFlowWithLlm(req, lastAi, mainLine, speakChars, modelCfg);
+                if (StringUtils.hasText(polished)) {
+                    log.info("[主线] 上下文润色 recordId={} rawLen={} polishLen={}",
+                            req.getCallRecordId(),
+                            bridged != null ? bridged.length() : 0,
+                            polished.length());
+                    return buildQuickReply(req, SpeakTextLimiter.limit(polished, speakChars),
+                            modelCfg, start, false);
+                }
+            } catch (Exception e) {
+                log.warn("[主线] 上下文润色失败，回落规则承接 recordId={}: {}",
+                        req.getCallRecordId(), e.getMessage());
+            }
+        }
+        return buildQuickReply(req, SpeakTextLimiter.limit(bridged, speakChars), modelCfg, start, false);
+    }
+
+    private String polishMainFlowWithLlm(AiChatRequest req, String lastAi, String mainLine,
+                                         int speakChars, AiModelConfig modelCfg) {
+        String system = MainFlowContextBridge.polishSystemHint(
+                req.getUserText(), lastAi, mainLine, speakChars);
+        List<Map<String, String>> messages = new ArrayList<>();
+        messages.add(Map.of("role", "system", "content", system));
+        // 仅带最近 2 轮，降低延迟
+        if (req.getHistory() != null && !req.getHistory().isEmpty()) {
+            int from = Math.max(0, req.getHistory().size() - 4);
+            for (int i = from; i < req.getHistory().size(); i++) {
+                AiChatMessage m = req.getHistory().get(i);
+                if (m == null || !StringUtils.hasText(m.getRole()) || !StringUtils.hasText(m.getContent())) {
+                    continue;
+                }
+                String role = "assistant".equalsIgnoreCase(m.getRole()) ? "assistant" : "user";
+                messages.add(Map.of("role", role, "content", m.getContent().trim()));
+            }
+        }
+        messages.add(Map.of("role", "user", "content", req.getUserText().trim()));
+        AiModelConfig llmCfg = cappedModelCfg(modelCfg);
+        if (llmCfg.getMaxTokens() == null || llmCfg.getMaxTokens() < 48) {
+            AiModelConfig copy = new AiModelConfig();
+            org.springframework.beans.BeanUtils.copyProperties(llmCfg, copy);
+            copy.setMaxTokens(48);
+            llmCfg = copy;
+        }
+        String raw = llmInvokeService.chat(messages, llmCfg);
+        String cleaned = forcedHangupService.stripHangupMarkers(raw);
+        if (!StringUtils.hasText(cleaned)) {
+            return null;
+        }
+        // 润色结果若完全丢掉主线问句关键词，回落规则版
+        String core = mainLine == null ? "" : mainLine.replaceAll("[\\s，,。.!！?？~～]+", "");
+        String out = cleaned.trim();
+        if (core.length() >= 4) {
+            String probe = core.substring(0, Math.min(4, core.length()));
+            if (!out.contains(probe) && !out.contains("吗") && !out.contains("呢") && !out.contains("？")) {
+                return null;
+            }
+        }
+        return out;
+    }
+
     private AiChatResponse buildQuickReply(AiChatRequest req, String reply, AiModelConfig modelCfg, long start) {
         return buildQuickReply(req, reply, modelCfg, start, false);
     }
@@ -732,14 +1066,19 @@ public class OllamaChatService {
             decision = HangupDecision.none(decision.getElapsedSeconds(), decision.getInvalidChatRounds());
         }
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(req.getHistory(), req.getUserText());
-        boolean endCall = DialogSlotHelper.shouldEndCall(req.getUserText(), slots, req.getHistory())
-                || isMainFlowHangupReply(req, reply);
+        // AI 外呼：仅主线结束语（含再见）可挂机；槽位齐不自动挂
+        boolean endCall = isMainFlowHangupReply(req, reply);
+        if (!aiVoiceProperties.isDialogLlmPrimary()) {
+            endCall = endCall || DialogSlotHelper.shouldEndCall(req.getUserText(), slots, req.getHistory());
+        }
         if (DialogSlotHelper.shouldBypassRag(req.getUserText())) {
             endCall = false;
         }
         String polished = keywordFallback ? reply : DialogSlotHelper.diversifyIfNeeded(reply, slots, req.getUserText(), req.getHistory());
         String body = polished != null ? polished : reply;
-        String finalReply = endCall ? DialogSlotHelper.goodbyeReply(req.getHistory()) : trimReply(body);
+        String finalReply = endCall
+                ? DialogSlotHelper.goodbyeReply(req.getHistory())
+                : SpeakTextLimiter.limit(body, speakBudget());
 
         AiChatResponse r = new AiChatResponse();
         r.setReply(finalReply);
@@ -855,48 +1194,33 @@ public class OllamaChatService {
         }
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(history, currentUser);
         sb.append(DialogSlotHelper.promptSummary(slots));
-        sb.append("\n\n【说话风格】像资深金融信贷顾问打电话：亲切稳重、自然流畅，不要背稿；")
-                .append("拒绝长句和书面语，改成口语短句；")
-                .append("【重要】每次只说一句话，不超过")
-                .append(aiVoiceProperties.getMaxSpeakChars())
-                .append("字；说完就停，等客户接话；")
-                .append("核心卖点单独成句，不要一次堆多个问题；")
-                .append("禁止「诸如、综上所述、也就是说」；一次只问一个问题；")
-                .append("可用「嗯」「好的」「没事」「不好意思啊」；禁止机械套话、禁止连续两个问号；")
-                .append("客户听不清或回答含糊时，换种说法再问，不要复制上一轮原句。");
-        sb.append("\n【实时对话】严格轮次：你只在客户说完并停顿后才回复；")
-                .append("每轮仅1句口语，必须说完整，总长不超过")
-                .append(aiVoiceProperties.getMaxSpeakChars()).append("字；已通话")
-                .append(elapsedSeconds).append("秒（上限")
+        int maxChars = Math.max(aiVoiceProperties.getMaxSpeakChars(), 40);
+        sb.append("\n\n【说话风格】你是电话里的真人信贷顾问，必须全程口语聊天，像微信语音说话：")
+                .append("用「您/你、这边、大概、那、行、嗯」这类口头词；禁止书面腔和念稿腔。")
+                .append("反例（禁止）：「请问您大概需要多少资金呢」「有几个问题需要了解一下」。")
+                .append("正例（要用）：「那您大概要多少资金呢」「先问一下，您是上班还是做生意呀」。")
+                .append("先接住客户本句，再自然往下聊；每次只说一句，不超过").append(maxChars).append("字；")
+                .append("说完停等客户；一次只问一个问题。主线只是引导目标，不要照念原文。")
+                .append("听不清就换个说法再问，禁止瞎猜、跳题、主动挂断或说再见。");
+        sb.append("\n【实时对话】严格轮次；已通话").append(elapsedSeconds).append("秒（上限")
                 .append(ForcedHangupRules.MAX_CALL_SECONDS).append("秒）。")
-                .append("必须结合下方对话历史与槽位回答，禁止脱离本通电话上下文。")
-                .append("【当前优先】必须先直接回应客户本句「").append(currentUser.trim())
-                .append("」，禁止无视提问继续按推销主线往下问。")
-                .append("客户问利率/利息/额度/办理方式/公司身份时，先给简明答案再酌情追问。")
-                .append("客户问「多少钱/利率/要多少」时：必须先说明额度或费用区间再给建议，禁止只重复客户说的数字。")
-                .append("客户问「50万还是80万」时：先答额度一般二十万到一百万、看资质，再问清他要五十万还是八十万。");
+                .append("【当前优先】必须先直接回应客户本句「").append(currentUser.trim()).append("」。")
+                .append("「没有/不用」：上一问是有车/有房/社保等 → 按否定资质接话；上一问是要不要贷款 → 温和挽回，不要立刻再见。")
+                .append("问利率/额度/公司身份：先简明作答再追问。")
+                .append("纯数字在问额度场景按「X万」理解。");
         if (history != null && !history.isEmpty()) {
-            sb.append("开场白已播过，不要重复问「有没有资金需求」；针对客户上一句回应。");
+            sb.append("开场白已播过，不要重复开场问法；针对客户最新一句回应。");
         }
-        sb.append("客户已说清的信息不要再问；需要澄清时语气柔和。");
-        sb.append("客户说纯数字或「八十」「五十」等时，在问额度场景下理解为「八十万」「五十万」，禁止再说没听清。");
+        sb.append("客户已说清的信息不要再问。");
         if (aiVoiceProperties.isDialogLlmPrimary() && history != null && !history.isEmpty()) {
-            sb.append("\n\n【上下文提示】下方消息列表已含完整对话，请结合客户最新一句回复，勿重复已问过的问题。");
+            sb.append("\n\n【上下文】下方消息为完整本通对话，请结合历史回复，勿重复已问过的问题。");
         } else if (history != null && !history.isEmpty()) {
-            sb.append("\n\n【完整对话记录（请结合上下文回复，勿重复已问过的问题）】\n");
+            sb.append("\n\n【完整对话记录】\n");
             appendTranscript(sb, history);
             sb.append("客户：").append(currentUser.trim());
         }
-        sb.append("额度、时间、用途都收集齐后，收尾只说一次，不要每轮重复「记下了、还有其他想了解吗」；")
-                .append("客户说没有了就礼貌告别并结束；客户问哪里/谁/什么公司必须直接回答身份。");
-        sb.append("客户问「你是哪里/什么公司/哪位」时，用一两句说明身份与来电目的，禁止照搬开场白全文。")
-                .append("客户问提供哪些服务/产品时，简要说明贷款或周转类产品并反问金额用途。")
-                .append("客户已回答金额、用途、时间、个人/经营等具体问题后，必须继续追问下一项，不要主动结束通话。")
-                .append("客户说「听不清/听不见」时，放慢语速、用更短句子重复要点。")
-                .append("客户问「什么意思/新需求吗」时，用一句话解释来电目的，再继续询问需求。")
-                .append("话术里禁止出现「XX公司」等占位符，用真实机构表述。")
-                .append("禁止在回复末尾输出 [挂断触发]；是否结束通话由系统根据辱骂投诉、客户明确拒接、满5分钟三类规则判定，你只需正常对话。")
-                .append("参考结束语（仅系统挂断时播放，你日常回复不要用）：")
+        sb.append("禁止输出 [挂断触发]；挂机由系统判定（辱骂投诉、强硬勿扰、满5分钟）。日常回复不要用结束语。")
+                .append("参考结束语（仅系统挂断）：")
                 .append(StringUtils.hasText(prompt.getEndRemarks())
                         ? prompt.getEndRemarks() : ForcedHangupRules.END_WORDS);
         return sb.toString();
@@ -908,7 +1232,7 @@ public class OllamaChatService {
         m.put("rules", List.of(
                 "辱骂、脏话、投诉举报 → 礼貌结束",
                 "客户明确表示不要再打扰 → 礼貌结束",
-                "通话满5分钟 → 说明情况后礼貌结束"));
+                "通话满10分钟 → 说明情况后礼貌结束"));
         m.put("endWords", ForcedHangupRules.END_WORDS);
         m.put("durationEndWords", ForcedHangupRules.DURATION_END_WORDS);
         m.put("hangupTypes", List.of(
@@ -937,9 +1261,14 @@ public class OllamaChatService {
         int cap = aiVoiceProperties.getDialogLlmMaxTokens();
         Double tempOverride = aiVoiceProperties.getDialogLlmTemperature();
         Double topPOverride = aiVoiceProperties.getDialogLlmTopP();
+        int llmTimeoutSec = Math.max(5, Math.min(60, aiVoiceProperties.getDialogLlmTimeoutSec()));
+        // HTTP 读超时对齐回合 LLM 超时，避免 60s 空转被 8s 线程池掐断
+        int alignedReadTimeoutMs = (llmTimeoutSec + 2) * 1000;
         boolean needCopy = (cap > 0 && cfg.getMaxTokens() != null && cfg.getMaxTokens() > cap)
                 || tempOverride != null
-                || (topPOverride != null && topPOverride > 0 && topPOverride < 1.0);
+                || (topPOverride != null && topPOverride > 0 && topPOverride < 1.0)
+                || cfg.getReadTimeoutMs() == null
+                || cfg.getReadTimeoutMs() > alignedReadTimeoutMs;
         if (!needCopy) {
             return cfg;
         }
@@ -953,6 +1282,9 @@ public class OllamaChatService {
         }
         if (topPOverride != null && topPOverride > 0 && topPOverride <= 1.0) {
             c.setTopP(topPOverride);
+        }
+        if (cfg.getReadTimeoutMs() == null || cfg.getReadTimeoutMs() > alignedReadTimeoutMs) {
+            c.setReadTimeoutMs(alignedReadTimeoutMs);
         }
         return c;
     }

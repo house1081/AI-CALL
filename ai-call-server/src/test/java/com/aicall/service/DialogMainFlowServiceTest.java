@@ -34,19 +34,19 @@ class DialogMainFlowServiceTest {
         service = new DialogMainFlowService(scriptRegistry);
         lenient().when(scriptRegistry.isMainFlowEnabled(anyInt())).thenReturn(true);
         lenient().when(scriptRegistry.mainFlowStepOrder(1)).thenReturn(ORDER);
-        lenient().when(scriptRegistry.mainFlowScript(eq("07"), eq(1))).thenReturn("工资呢！每月大概是多少呢！");
-        lenient().when(scriptRegistry.mainFlowScript(eq("05"), eq(1))).thenReturn("那您社保当前连续缴纳多久了？");
-        lenient().when(scriptRegistry.mainFlowScript(eq("08"), eq(1))).thenReturn("您名下的公司有没有开票或者交税呢");
+        lenient().when(scriptRegistry.mainFlowScript(eq("07"), eq(1))).thenReturn("工资呢，每个月大概多少？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("05"), eq(1))).thenReturn("那社保这边，连续交了多久了？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("08"), eq(1))).thenReturn("您名下公司有没有开票或者交税呀？");
         lenient().when(scriptRegistry.mainFlowScript(eq("12"), eq(1))).thenReturn("嗯，那您名下有车吗？");
-        lenient().when(scriptRegistry.mainFlowScript(eq("13"), eq(1))).thenReturn("那再问一下啊，那您名下有房吗？");
-        lenient().when(scriptRegistry.mainFlowScript(eq("13A"), eq(1))).thenReturn("好的，那请问您的这套房子是全款的呢，还是还在按揭中？");
-        lenient().when(scriptRegistry.mainFlowScript(eq("07A"), eq(1))).thenReturn("好的，那我再了解一下，您目前的征信情况怎么样呢？");
-        lenient().when(scriptRegistry.mainFlowScript(eq("14"), eq(1))).thenReturn("嗯，人寿保险购买过吗？");
-        lenient().when(scriptRegistry.mainFlowScript(eq("04"), eq(1))).thenReturn("您社保和公积金都在正常缴纳吗？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("13"), eq(1))).thenReturn("再问一下，您名下有房吗？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("13A"), eq(1))).thenReturn("好的，这套房子是全款的，还是还在按揭中？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("07A"), eq(1))).thenReturn("好的，再问一下，您现在征信怎么样？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("14"), eq(1))).thenReturn("嗯，人寿保险买过吗？");
+        lenient().when(scriptRegistry.mainFlowScript(eq("04"), eq(1))).thenReturn("您社保和公积金都在正常交吗？");
         lenient().when(scriptRegistry.mainFlowScript(eq("03"), eq(1))).thenReturn(
-                "那我这边给您匹配下产品，有几个问题需要了解一下，请问您是上班还是做生意呢？");
+                "行，我这边给您对一下产品，先问一下，您是上班还是做生意呀？");
         lenient().when(scriptRegistry.mainFlowScript(eq("27"), eq(1))).thenReturn(
-                "啊，您别这么快拒绝嘛，现在这个贷款利息真的很低，而且呢您可以留着备用嘛！那我这边加一下微信您可以吗？");
+                "哎您先别急着拒绝，现在利息真挺低的，留着备用也行，我加您个微信可以吗？");
         service.initCall(100, 1);
     }
 
@@ -54,15 +54,26 @@ class DialogMainFlowServiceTest {
     void asrCorrection_replaysCurrentStep() {
         service.restoreStep(100, "03");
         String line = service.nextMainLineAfterUser(100, "说错了", "上班还是做生意");
-        assertEquals("那我这边给您匹配下产品，有几个问题需要了解一下，请问您是上班还是做生意呢？", line);
+        assertEquals("行，我这边给您对一下产品，先问一下，您是上班还是做生意呀？", line);
         assertEquals("03", service.currentStep(100));
+    }
+
+    @Test
+    void peekNextScript_doesNotAdvanceStep() {
+        service.restoreStep(100, "03");
+        String peek = service.peekNextScript(100, "做生意", "上班还是做生意");
+        assertEquals("您名下公司有没有开票或者交税呀？", peek);
+        assertEquals("03", service.currentStep(100));
+        String committed = service.commitAdvanceAfterReply(100, "做生意", "上班还是做生意");
+        assertEquals("您名下公司有没有开票或者交税呀？", committed);
+        assertEquals("08", service.currentStep(100));
     }
 
     @Test
     void businessUser_skipsToStep08() {
         service.restoreStep(100, "03");
         String line = service.nextMainLineAfterUser(100, "做生意", "上班还是做生意");
-        assertEquals("您名下的公司有没有开票或者交税呢", line);
+        assertEquals("您名下公司有没有开票或者交税呀？", line);
         assertEquals("08", service.currentStep(100));
     }
 
@@ -70,7 +81,7 @@ class DialogMainFlowServiceTest {
     void selfEmployed_skipsToStep08() {
         service.restoreStep(100, "03");
         String line = service.nextMainLineAfterUser(100, "自己干活的", "上班还是做生意");
-        assertEquals("您名下的公司有没有开票或者交税呢", line);
+        assertEquals("您名下公司有没有开票或者交税呀？", line);
         assertEquals("08", service.currentStep(100));
     }
 
@@ -140,7 +151,7 @@ class DialogMainFlowServiceTest {
         service.restoreStep(100, "15");
         String line = service.continueAfterWeChatDecline(100, 1,
                 "你看这样可以吗？咋俩先加个微信，帮您先匹配一下您的可贷额度以及利息等，你看可以么！");
-        assertEquals("啊，您别这么快拒绝嘛，现在这个贷款利息真的很低，而且呢您可以留着备用嘛！那我这边加一下微信您可以吗？", line);
+        assertEquals("哎您先别急着拒绝，现在利息真挺低的，留着备用也行，我加您个微信可以吗？", line);
         assertEquals("27", service.currentStep(100));
     }
 
@@ -148,7 +159,7 @@ class DialogMainFlowServiceTest {
     void hasProperty_asksFullOrMortgage() {
         service.restoreStep(100, "13");
         String line = service.nextMainLineAfterUser(100, "我有房", "那您名下有房吗");
-        assertEquals("好的，那请问您的这套房子是全款的呢，还是还在按揭中？", line);
+        assertEquals("好的，这套房子是全款的，还是还在按揭中？", line);
         assertEquals("13A", service.currentStep(100));
     }
 
@@ -156,7 +167,7 @@ class DialogMainFlowServiceTest {
     void employeeWithSocialFund_skipsStep04() {
         service.restoreStep(100, "03");
         String line = service.nextMainLineAfterUser(100, "上班有公积金", "上班还是做生意");
-        assertEquals("那您社保当前连续缴纳多久了？", line);
+        assertEquals("那社保这边，连续交了多久了？", line);
         assertEquals("05", service.currentStep(100));
     }
 
@@ -164,7 +175,7 @@ class DialogMainFlowServiceTest {
     void salaryThenCreditInquiry() {
         service.restoreStep(100, "07");
         String line = service.nextMainLineAfterUser(100, "一万", "工资呢");
-        assertEquals("好的，那我再了解一下，您目前的征信情况怎么样呢？", line);
+        assertEquals("好的，再问一下，您现在征信怎么样？", line);
         assertEquals("07A", service.currentStep(100));
     }
 

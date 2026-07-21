@@ -55,8 +55,8 @@ public final class DialogSlotHelper {
             "分开问下，多少万、什么时候用？"
     };
     private static final String[] GOODBYE = {
-            "好的，那不打扰您了，祝您生活愉快，再见。",
-            "嗯嗯，感谢您时间，后续有需要随时联系，再见。"
+            "好的，那先不打扰您了，祝您生活愉快，再见。",
+            "嗯嗯，谢谢您时间，后续有需要随时联系，再见。"
     };
     private static final String[] WRAP_UP_FOLLOW = {
             "那我先把资料发您，您留意手机短信就行。",

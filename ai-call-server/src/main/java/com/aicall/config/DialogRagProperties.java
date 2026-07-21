@@ -41,6 +41,8 @@ public class DialogRagProperties {
     private boolean loanPackAutoImport = true;
     /** 启动时从话术包同步 FAQ 兜底（按 fallback 编号 upsert，不覆盖已有录音） */
     private boolean loanPackSyncFallbacksOnStartup = true;
+    /** 启动时从话术包同步主线话术文案（按 flow:step upsert） */
+    private boolean loanPackSyncMainFlowOnStartup = true;
     /** 智能预录：向量索引拼接关键词与答案摘要，提升语义命中 */
     private boolean enrichIndexWithKeywords = true;
     /** 智能预录：检索扩展 top-k（多候选换录音） */
@@ -49,4 +51,6 @@ public class DialogRagProperties {
     private double highConfidenceFaqScore = 1.85;
     /** 有可播录音时放宽的最低向量分 */
     private double playableMinScore = 0.52;
+    /** AI 外呼：向量检索硬超时（毫秒），超时跳过注入，禁止挡开口 */
+    private int retrieveTimeoutMs = 800;
 }

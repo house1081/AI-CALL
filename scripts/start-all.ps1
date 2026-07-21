@@ -16,9 +16,14 @@ if ($javaVersion -match 'version "1\.([0-9]+)' -or $javaVersion -match 'version 
     }
 }
 
-$Jdk17 = "C:\Program Files\Microsoft\jdk-17.0.19.10-hotspot"
-if (-not (Test-Path $Jdk17)) {
-    Write-Warning "未找到 JDK 17，请安装 Microsoft.OpenJDK.17 或设置 JAVA_HOME"
+$Jdk17Candidates = @(
+    "C:\Program Files\Java\jdk-17.0.18",
+    "C:\Program Files\Microsoft\jdk-17.0.19.10-hotspot",
+    $env:JAVA_HOME
+) | Where-Object { $_ -and (Test-Path $_) }
+$Jdk17 = $Jdk17Candidates | Select-Object -First 1
+if (-not $Jdk17) {
+    Write-Warning "未找到 JDK 17，请安装 JDK 17 并设置 JAVA_HOME"
 }
 
 Write-Host "`n[1/3] 启动后端 ai-call-server (端口 8081，真实外呼)..." -ForegroundColor Yellow

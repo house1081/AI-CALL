@@ -29,12 +29,12 @@ public class RestClientConfig {
                 .build();
     }
 
-    /** RAG 嵌入专用：短超时，避免阻塞对话轮次 */
+    /** RAG 嵌入专用：短超时，避免阻塞外呼开口（原先 8s 读超时会空等致客户挂机） */
     @Bean
     public RestTemplate embedRestTemplate(RestTemplateBuilder builder) {
         return builder
-                .setConnectTimeout(Duration.ofMillis(3000))
-                .setReadTimeout(Duration.ofMillis(8000))
+                .setConnectTimeout(Duration.ofMillis(1500))
+                .setReadTimeout(Duration.ofMillis(1500))
                 .build();
     }
 }

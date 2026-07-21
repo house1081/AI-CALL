@@ -56,7 +56,7 @@ public class ForcedHangupService {
     }
 
     /**
-     * 仅三类规则触发结束：辱骂脏话投诉、明确拒接打扰、通话满 5 分钟。
+     * 仅三类规则触发结束：辱骂脏话投诉、明确拒接打扰、通话超时。
      */
     public HangupDecision evaluateBeforeAi(Integer callRecordId, String trainSessionId,
                                            String userText, Boolean businessProbeThisTurn) {
@@ -75,8 +75,9 @@ public class ForcedHangupService {
             log.info("[挂断] 辱骂/投诉 uuidKey={} text={}", key, userText);
             return forceWithWords(HangupType.FORCE_ABUSE, elapsed);
         }
-        if (StringUtils.hasText(userText) && ForcedHangupRules.wantsNoDisturbance(userText)) {
-            log.info("[挂断] 客户拒接打扰 uuidKey={} text={}", key, userText);
+        // 仅强硬勿扰挂机；「不用了/没需求/没有」等软拒交给主线挽回，禁止一上来挂断
+        if (StringUtils.hasText(userText) && ForcedHangupRules.isHardNoDisturbance(userText)) {
+            log.info("[挂断] 客户强硬勿扰 uuidKey={} text={}", key, userText);
             return forceWithWords(HangupType.FORCE_REFUSE, elapsed);
         }
 

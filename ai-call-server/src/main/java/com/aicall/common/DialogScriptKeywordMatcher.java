@@ -218,10 +218,13 @@ public final class DialogScriptKeywordMatcher {
             return false;
         }
         String u = userText.toLowerCase(Locale.ROOT);
-        return u.contains("不需要") || u.contains("不用") || u.contains("没兴趣") || u.contains("别打了")
-                || u.contains("骚扰") || u.contains("挂了") || u.contains("不要") || u.contains("不考虑")
+        // 避免「不要太高/不要微信」等误判；强硬勿扰与明确拒贷才算拒绝
+        return u.contains("不需要") || u.contains("不用了") || u.equals("不用") || u.contains("没兴趣")
+                || u.contains("别打了") || u.contains("骚扰") || u.contains("不考虑")
+                || u.contains("不要贷款") || u.contains("不要了") || u.contains("不要打")
                 || u.contains("没有需求") || u.contains("没需求") || u.contains("没有这方面") || u.contains("没这方面")
-                || u.contains("不贷款") || u.contains("不用贷");
+                || u.contains("不贷款") || u.contains("不用贷")
+                || ForcedHangupRules.isHardNoDisturbance(userText);
     }
 
     public static boolean looksLikeRefuse(String userText, String lastAssistantText) {

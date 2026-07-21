@@ -32,10 +32,16 @@ public class DialogLlmExecutorService {
     }
 
     public <T> T run(SupplierThrowing<T> task) throws Exception {
+        int timeoutSec = Math.max(5, Math.min(60, aiVoiceProperties.getDialogLlmTimeoutSec()));
+        return run(task, timeoutSec);
+    }
+
+    /** @param timeoutSec 仅约束本任务（应为 LLM 调用，勿把 TTS/播报包进来） */
+    public <T> T run(SupplierThrowing<T> task, int timeoutSec) throws Exception {
         if (!aiVoiceProperties.isDialogLlmAsync()) {
             return task.get();
         }
-        int timeoutSec = Math.max(8, Math.min(60, aiVoiceProperties.getDialogLlmTimeoutSec()));
+        int sec = Math.max(5, Math.min(60, timeoutSec));
         Future<T> future = executor.submit(() -> {
             try {
                 return task.get();
@@ -47,10 +53,10 @@ public class DialogLlmExecutorService {
             }
         });
         try {
-            return future.get(timeoutSec, TimeUnit.SECONDS);
+            return future.get(sec, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             future.cancel(true);
-            throw new TimeoutException("大模型调用超时 " + timeoutSec + "s");
+            throw new TimeoutException("大模型调用超时 " + sec + "s");
         } catch (ExecutionException e) {
             Throwable c = e.getCause();
             if (c instanceof Exception ex) {

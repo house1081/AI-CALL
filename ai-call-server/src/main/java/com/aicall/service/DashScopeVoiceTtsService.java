@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -49,7 +50,8 @@ public class DashScopeVoiceTtsService {
             .connectTimeout(Duration.ofSeconds(15))
             .build();
 
-    private final Object globalTtsLock = new Object();
+    /** 允许有限并发合成，避免全进程串行拖慢流式首句+尾巴 */
+    private final Semaphore ttsSlots = new Semaphore(2);
     private final AtomicLong lastTtsRequestAt = new AtomicLong(0);
     private volatile long rateLimitCooldownUntilMs = 0L;
 
@@ -86,7 +88,10 @@ public class DashScopeVoiceTtsService {
         if (!StringUtils.hasText(apiKey) || !StringUtils.hasText(text)) {
             return null;
         }
-        synchronized (globalTtsLock) {
+        boolean acquired = false;
+        try {
+            ttsSlots.acquire();
+            acquired = true;
             int maxRetries = Math.max(0, aiVoiceProperties.getTtsRateLimitRetries());
             for (int attempt = 0; attempt <= maxRetries; attempt++) {
                 try {
@@ -98,7 +103,8 @@ public class DashScopeVoiceTtsService {
                         throw new TtsSynthesisException("CosyVoice 无有效音频", false);
                     }
                     byte[] telephony = toTelephonyWav(raw);
-                    telephony = TelephonyWavUtil.normalizeWavPeak(telephony, 0.9);
+                    telephony = TelephonyWavUtil.normalizeWavPeak(
+                            telephony, aiVoiceProperties.getPlaybackPeakRatio());
                     Files.write(out, telephony);
                     log.info("CosyVoice 已合成 8k/mono/16bit wav {} bytes model={} voice={}",
                             telephony.length, resolveTtsModel(voiceIdOverride), resolveVoice(voiceIdOverride));
@@ -126,6 +132,13 @@ public class DashScopeVoiceTtsService {
                     logTtsFailureHint(voiceIdOverride, e);
                     throw new TtsSynthesisException("CosyVoice TTS 失败: " + e.getMessage(), e, rateLimited);
                 }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new TtsSynthesisException("CosyVoice TTS 中断", e, false);
+        } finally {
+            if (acquired) {
+                ttsSlots.release();
             }
         }
         throw new TtsSynthesisException("CosyVoice TTS 失败", false);

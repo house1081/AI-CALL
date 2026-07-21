@@ -76,6 +76,9 @@ public class TtsPhraseCacheService {
                 ForcedHangupRules.turnBasedSilenceProbe(3),
                 ForcedHangupRules.turnBasedUnclearAsrNudge(),
                 ForcedHangupRules.hearingFallbackReply(),
+                ForcedHangupRules.llmTimeoutFallbackReply(),
+                ForcedHangupRules.softDeclineRecoveryReply(),
+                ForcedHangupRules.continueDialogReply(""),
                 "您好，请问您这边可以听到吗？",
                 "您好，请问是否可以正常沟通？",
                 "不好意思，这边信号可能有点不好，您那边声音有点小，麻烦您再说一遍好吗？"

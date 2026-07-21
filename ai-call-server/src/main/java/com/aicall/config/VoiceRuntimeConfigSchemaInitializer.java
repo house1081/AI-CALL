@@ -54,8 +54,8 @@ public class VoiceRuntimeConfigSchemaInitializer {
                         + "COMMENT '系统预置音色 voice 参数'");
 
         addColumnIfMissing("silence_profile",
-                "ALTER TABLE voice_runtime_config ADD COLUMN silence_profile varchar(16) NOT NULL DEFAULT 'stable' "
-                        + "COMMENT 'stable|fast 句末档位'");
+                "ALTER TABLE voice_runtime_config ADD COLUMN silence_profile varchar(16) NOT NULL DEFAULT 'balanced' "
+                        + "COMMENT 'balanced|stable|fast 句末档位'");
 
         seedCosyvoiceFromYmlIfEmpty();
         ensurePlayOpeningOnAnswerEnabled();

@@ -105,15 +105,21 @@ public class OutboundDialogLoopService {
                 humanTransferService.finalizeAiHandoff(uuid, callRecordId, callStart);
                 return;
             }
-            voicePlaybackService.stopChannelPlayback(uuid);
+            // 先确保挂机话术播完，再停播放/挂断，避免把结束语掐掉
             String recordUrl = callSessionRecordService.stopAndPublish(uuid, callRecordId);
             if (eslService.uuidExists(uuid)) {
                 if (!Boolean.TRUE.equals(politeEndingPlayed.get())) {
                     ttsFailureRecoveryService.playEndingThenHangup(
                             uuid, callRecordId, ForcedHangupRules.END_WORDS, "dialog-finally");
+                    politeEndingPlayed.set(true);
                 } else {
-                    eslService.hangupChannel(uuid, "dialog-finally");
+                    voicePlaybackService.stopChannelPlayback(uuid);
+                    if (eslService.uuidExists(uuid)) {
+                        eslService.hangupChannel(uuid, "dialog-finally");
+                    }
                 }
+            } else {
+                voicePlaybackService.stopChannelPlayback(uuid);
             }
             callAiVoiceService.releaseCallResources(uuid);
             voicePlaybackService.releaseChannel(uuid);
@@ -181,6 +187,15 @@ public class OutboundDialogLoopService {
                 }
             } else {
                 log.info("[对话] 开场白已在 playOpening/摘机即播 阶段等待播完，跳过重复等待 uuid={}", uuid);
+                // 防御：若仍在播（时长登记偏短/FS 延迟），继续等到真实结束，禁止提前听音掐断
+                if (voicePlaybackService.isPlaybackActive(uuid)) {
+                    try {
+                        log.info("[对话] 开场白仍在播放，补等剩余时长 uuid={}", uuid);
+                        voicePlaybackService.waitPlaybackFinished(uuid, opening);
+                    } catch (Exception e) {
+                        log.debug("[对话] 开场白补等忽略 uuid={}: {}", uuid, e.getMessage());
+                    }
+                }
             }
             callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
             log.info("[对话] 预录开场白已播，等待客户说话 uuid={} recordId={}", uuid, callRecordId);
@@ -198,6 +213,8 @@ public class OutboundDialogLoopService {
         int emptyListenStreak = 0;
         int silenceProbeCount = 0;
         boolean silenceMainFlowReplayUsed = false;
+        int echoSkipStreak = 0;
+        int sideTalkStreak = 0;
         long lastAiSpeechMs = System.currentTimeMillis();
         boolean endedByHangup = false;
         int endCallStatus = CallStatus.CONNECTED;
@@ -224,11 +241,22 @@ public class OutboundDialogLoopService {
             }
             boolean userHoldingFloor = dialogTurnRegistry.getSpeaker(uuid)
                     == DialogTurnRegistry.ActiveSpeaker.USER;
-            if (!userHoldingFloor) {
+            // 上一轮已 waitPlaybackFinished 时不再强制空等，降低开口→听音延迟
+            if (!userHoldingFloor && !skipPlaybackTailWait) {
                 awaitMinGapAfterAiSpeech(lastAiSpeechMs);
             }
             recordingOnlyPlaybackService.awaitOutboundPlaybackReady(uuid);
-            voicePlaybackService.stopChannelPlayback(uuid);
+            // 听音前若 AI 仍在播：先等完，禁止旁白/下一轮听音把话掐断
+            if (voicePlaybackService.isPlaybackActive(uuid)) {
+                log.info("[对话] 听音前等待 AI 播完，避免掐断 uuid={}", uuid);
+                try {
+                    voicePlaybackService.waitPlaybackFinished(uuid, "", null, true);
+                } catch (Exception waitEx) {
+                    log.debug("[对话] 等待播完忽略 uuid={}: {}", uuid, waitEx.getMessage());
+                }
+            } else if (!skipPlaybackTailWait) {
+                voicePlaybackService.stopChannelPlayback(uuid);
+            }
             if (!userHoldingFloor) {
                 callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
             }
@@ -313,25 +341,91 @@ public class OutboundDialogLoopService {
                 rounds++;
                 continue;
             }
+            // 旁白/第三人说话：不挂机、不推进；最多轻问两次，避免旁白持续时 AI 刷屏也不说话
+            if (ForcedHangupRules.isLikelySideTalk(userText)) {
+                sideTalkStreak++;
+                log.info("[对话] 疑似旁白/第三人说话，忽略挂机规则 uuid={} text={} streak={}",
+                        uuid, userText, sideTalkStreak);
+                if (sideTalkStreak <= 2
+                        || System.currentTimeMillis() - lastAiSpeechMs >= 8000) {
+                    if (playTurnBasedNudge(uuid, callRecordId, history,
+                            ForcedHangupRules.sideTalkClarifyReply())) {
+                        lastAiSpeechMs = System.currentTimeMillis();
+                        skipPlaybackTailWait = true;
+                    }
+                }
+                callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
+                rounds++;
+                continue;
+            }
+            sideTalkStreak = 0;
             String lastAi = lastAssistantText(history);
             if (isLikelyEchoFromAssistant(userText, history)) {
-                log.warn("[对话] 疑似机器人录音回声，跳过本轮 ASR uuid={} text={}", uuid, userText);
+                echoSkipStreak++;
+                log.warn("[对话] 疑似机器人录音回声，跳过本轮 ASR uuid={} text={} streak={}",
+                        uuid, userText, echoSkipStreak);
+                if (handleEchoSkipStreak(uuid, callRecordId, history, echoSkipStreak, lastAiSpeechMs)) {
+                    lastAiSpeechMs = System.currentTimeMillis();
+                    skipPlaybackTailWait = true;
+                    echoSkipStreak = 0;
+                }
                 callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
                 continue;
             }
             if (ForcedHangupRules.isLikelyAsrEcho(userText, lastAi)) {
-                log.warn("[对话] 疑似 TTS 回声，跳过本轮 ASR uuid={} text={}", uuid, userText);
+                echoSkipStreak++;
+                log.warn("[对话] 疑似 TTS 回声，跳过本轮 ASR uuid={} text={} streak={}",
+                        uuid, userText, echoSkipStreak);
+                if (handleEchoSkipStreak(uuid, callRecordId, history, echoSkipStreak, lastAiSpeechMs)) {
+                    lastAiSpeechMs = System.currentTimeMillis();
+                    skipPlaybackTailWait = true;
+                    echoSkipStreak = 0;
+                }
                 callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
                 continue;
             }
             if (ForcedHangupRules.isLikelyOpeningEchoFragment(userText, lastAi)) {
-                log.warn("[对话] 疑似开场白回声，跳过本轮 ASR uuid={} text={}", uuid, userText);
+                echoSkipStreak++;
+                log.warn("[对话] 疑似开场白回声，跳过本轮 ASR uuid={} text={} streak={}",
+                        uuid, userText, echoSkipStreak);
+                if (handleEchoSkipStreak(uuid, callRecordId, history, echoSkipStreak, lastAiSpeechMs)) {
+                    lastAiSpeechMs = System.currentTimeMillis();
+                    skipPlaybackTailWait = true;
+                    echoSkipStreak = 0;
+                }
                 callSessionRecordService.syncAsrBaselineAfterPlayback(uuid);
+                continue;
+            }
+            echoSkipStreak = 0;
+            // 含糊/听不清：换说法追问或重播主线，禁止当成拒贷/乱答推进
+            if (ForcedHangupRules.isVagueOrUnclearTranscript(userText)
+                    && !ForcedHangupRules.isCooperativeAnswer(userText)
+                    && !ForcedHangupRules.hasBusinessIntent(userText)
+                    && !DialogSlotHelper.isStatingLoanAmount(userText)) {
+                log.info("[对话] ASR 含糊，澄清追问 uuid={} text={}", uuid, userText);
+                String clarify = ForcedHangupRules.unclearClarifyReply(lastAi);
+                if (tryReplayMainFlowQuestion(uuid, callRecordId, history)
+                        || playTurnBasedNudge(uuid, callRecordId, history, clarify)) {
+                    lastAiSpeechMs = System.currentTimeMillis();
+                    skipPlaybackTailWait = true;
+                }
+                rounds++;
                 continue;
             }
             if (DialogSlotHelper.isFillerOnly(userText)) {
                 fillerOnlyStreak++;
-                if (fillerOnlyStreak >= 5) {
+                // 先澄清，很多次才挂；杂音误识「嗯」不应轻易结束
+                if (fillerOnlyStreak >= 6 && fillerOnlyStreak < 20) {
+                    if (tryReplayMainFlowQuestion(uuid, callRecordId, history)
+                            || playTurnBasedNudge(uuid, callRecordId, history,
+                            ForcedHangupRules.unclearClarifyReply(lastAi))) {
+                        lastAiSpeechMs = System.currentTimeMillis();
+                        skipPlaybackTailWait = true;
+                    }
+                    rounds++;
+                    continue;
+                }
+                if (fillerOnlyStreak >= 20) {
                     log.info("[对话] 客户连续语气词过多，结束对话 uuid={}", uuid);
                     endedByHangup = true;
                     playEndingThenHangup(
@@ -344,7 +438,17 @@ public class OutboundDialogLoopService {
             if (isDuplicateUserUtterance(history, userText)) {
                 duplicateUserStreak++;
                 log.warn("[对话] 客户重复短答 uuid={} text={} streak={}", uuid, userText, duplicateUserStreak);
-                if (duplicateUserStreak >= 3 || !eslService.uuidExists(uuid)) {
+                if (duplicateUserStreak >= 3 && duplicateUserStreak < 10) {
+                    if (tryReplayMainFlowQuestion(uuid, callRecordId, history)
+                            || playTurnBasedNudge(uuid, callRecordId, history,
+                            ForcedHangupRules.unclearClarifyReply(lastAi))) {
+                        lastAiSpeechMs = System.currentTimeMillis();
+                        skipPlaybackTailWait = true;
+                    }
+                    rounds++;
+                    continue;
+                }
+                if (duplicateUserStreak >= 10 || !eslService.uuidExists(uuid)) {
                     log.info("[对话] 客户重复应答过多或通道已断，结束对话 uuid={}", uuid);
                     if (eslService.uuidExists(uuid)) {
                         endedByHangup = true;
@@ -387,9 +491,14 @@ public class OutboundDialogLoopService {
             }
             long replyStart = System.currentTimeMillis();
             if (!dialogTurnRegistry.mayAiSpeak(uuid)) {
-                log.warn("[对话] 轮次门控拒绝 AI 播报 uuid={} speaker={}", uuid, dialogTurnRegistry.getSpeaker(uuid));
-                rounds++;
-                continue;
+                log.warn("[对话] 轮次门控拒绝 AI 播报 uuid={} speaker={}，尝试释放轮次",
+                        uuid, dialogTurnRegistry.getSpeaker(uuid));
+                dialogTurnRegistry.aiYieldsFloor(uuid);
+                dialogTurnRegistry.forceUserTurnReady(uuid);
+                if (!dialogTurnRegistry.mayAiSpeak(uuid)) {
+                    rounds++;
+                    continue;
+                }
             }
             dialogTurnRegistry.aiTakesFloor(uuid);
             prerecordCircuitService.recordOffTopicComplaint(uuid, userText);
@@ -469,13 +578,13 @@ public class OutboundDialogLoopService {
                 log.warn("[对话] LLM 应答为空 uuid={} recordId={} model={}",
                         uuid, callRecordId, resp.getModel());
             }
+            boolean asyncPlayback = Boolean.TRUE.equals(resp.getPlaybackWaitHandled())
+                    && recordingOnlyPlaybackService.shouldAsyncPlayback();
             if (StringUtils.hasText(reply)) {
                 String played = Boolean.TRUE.equals(resp.getShouldHangup())
                         && StringUtils.hasText(resp.getEndWords()) ? resp.getEndWords() : reply;
                 callDialogPersistService.appendAssistant(callRecordId, played);
                 if (eslService.uuidExists(uuid)) {
-                    boolean asyncPlayback = Boolean.TRUE.equals(resp.getPlaybackWaitHandled())
-                            && recordingOnlyPlaybackService.isOutboundPlaybackAsync();
                     boolean bargeIn = false;
                     if (!asyncPlayback) {
                         bargeIn = Boolean.TRUE.equals(resp.getPlaybackWaitHandled())
@@ -492,6 +601,19 @@ public class OutboundDialogLoopService {
                 }
                 appendHistory(history, "assistant", reply);
                 lastAiSpeechMs = System.currentTimeMillis();
+            } else if (eslService.uuidExists(uuid)) {
+                log.warn("[对话] LLM 应答为空，播放兜底追问 uuid={} recordId={}", uuid, callRecordId);
+                if (playTurnBasedNudge(uuid, callRecordId, history,
+                        ForcedHangupRules.turnBasedUnclearAsrNudge())) {
+                    lastAiSpeechMs = System.currentTimeMillis();
+                    skipPlaybackTailWait = true;
+                } else if (!asyncPlayback
+                        && dialogTurnRegistry.getSpeaker(uuid) == DialogTurnRegistry.ActiveSpeaker.AI) {
+                    dialogTurnRegistry.aiYieldsFloor(uuid);
+                }
+            } else if (!asyncPlayback
+                    && dialogTurnRegistry.getSpeaker(uuid) == DialogTurnRegistry.ActiveSpeaker.AI) {
+                dialogTurnRegistry.aiYieldsFloor(uuid);
             }
             rounds++;
             if (!eslService.uuidExists(uuid)) {
@@ -502,7 +624,19 @@ public class OutboundDialogLoopService {
                 endedByHangup = true;
                 String ending = ForcedHangupRules.resolvePoliteEndWords(
                         StringUtils.hasText(resp.getEndWords()) ? resp.getEndWords() : resp.getReply());
-                playEndingThenHangup(uuid, callRecordId, ending, "rule-hangup");
+                // 本轮已播过挂机话术：等播完再挂，勿打断重播
+                boolean farewellAlreadyPlayed = Boolean.TRUE.equals(resp.getPlaybackWaitHandled())
+                        && StringUtils.hasText(ending)
+                        && (ending.contains("再见") || ending.contains("拜拜") || ending.contains("生活愉快"));
+                if (farewellAlreadyPlayed) {
+                    politeEndingPlayed.set(true);
+                    awaitOutboundPlaybackBeforeHangup(uuid);
+                    if (eslService.uuidExists(uuid)) {
+                        eslService.hangupChannel(uuid, "rule-hangup");
+                    }
+                } else {
+                    playEndingThenHangup(uuid, callRecordId, ending, "rule-hangup");
+                }
                 break;
             }
             if (!eslService.uuidExists(uuid)) {
@@ -660,11 +794,26 @@ public class OutboundDialogLoopService {
     }
 
     private static final String LOOP_END_WORDS =
-            "好的，今天先聊到这儿，有需要随时联系我们，祝您生活愉快，再见。";
+            "好的，今天先这样，有需要随时找我们，祝您生活愉快，再见。";
 
     private void playGracefulLoopEnd(String uuid, Integer callRecordId, List<AiChatMessage> history) {
         appendHistory(history, "assistant", LOOP_END_WORDS);
         playEndingThenHangup(uuid, callRecordId, LOOP_END_WORDS, "loop-end");
+    }
+
+    /** 连续回声误判时，重播当前问题或播「没听清」，避免客户说话后 AI 长时间沉默 */
+    private boolean handleEchoSkipStreak(String uuid, Integer callRecordId, List<AiChatMessage> history,
+                                         int streak, long lastAiSpeechMs) throws Exception {
+        if (streak < 3 || System.currentTimeMillis() - lastAiSpeechMs < 1200) {
+            return false;
+        }
+        if (tryReplayMainFlowQuestion(uuid, callRecordId, history)) {
+            log.info("[对话] 回声跳过过多，重播主线问题 uuid={} streak={}", uuid, streak);
+            return true;
+        }
+        log.info("[对话] 回声跳过过多，播放没听清提示 uuid={} streak={}", uuid, streak);
+        return playTurnBasedNudge(uuid, callRecordId, history,
+                ForcedHangupRules.turnBasedUnclearAsrNudge());
     }
 
     /** 客户长时间静默时，重播当前主线问题而非直接挂机 */
@@ -740,18 +889,20 @@ public class OutboundDialogLoopService {
 
     private void playEndingThenHangup(String uuid, Integer callRecordId, String endText, String reason) {
         String ending = ForcedHangupRules.resolvePoliteEndWords(endText);
-        politeEndingPlayed.set(true);
         if (voiceRuntimeSettingsService.isSmartPrerecordMode()) {
             try {
                 if (playRecordingOnly(uuid, callRecordId, ending)) {
                     awaitOutboundPlaybackBeforeHangup(uuid);
+                    politeEndingPlayed.set(true);
                 } else {
                     ttsFailureRecoveryService.playEndingThenHangup(uuid, callRecordId, ending, reason);
+                    politeEndingPlayed.set(true);
                     return;
                 }
             } catch (Exception e) {
                 log.warn("[知识库录音] 结束语播放失败 uuid={} reason={}: {}", uuid, reason, e.getMessage());
                 ttsFailureRecoveryService.playEndingThenHangup(uuid, callRecordId, ending, reason);
+                politeEndingPlayed.set(true);
                 return;
             }
             if (eslService.uuidExists(uuid)) {
@@ -760,6 +911,7 @@ public class OutboundDialogLoopService {
             return;
         }
         ttsFailureRecoveryService.playEndingThenHangup(uuid, callRecordId, ending, reason);
+        politeEndingPlayed.set(true);
     }
 
     private void awaitOutboundPlaybackBeforeHangup(String uuid) {
@@ -845,7 +997,7 @@ public class OutboundDialogLoopService {
     }
 
     private void awaitMinGapAfterAiSpeech(long lastAiSpeechMs) throws InterruptedException {
-        int minGap = Math.max(80, aiVoiceProperties.resolveTurnBasedPlaybackTailMs() * 2);
+        int minGap = Math.max(40, aiVoiceProperties.resolveTurnBasedPlaybackTailMs());
         long sinceAi = System.currentTimeMillis() - lastAiSpeechMs;
         if (sinceAi < minGap) {
             Thread.sleep(minGap - sinceAi);

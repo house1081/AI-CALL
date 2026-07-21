@@ -7,26 +7,26 @@ import java.util.List;
  */
 public final class ForcedHangupRules {
 
-    /** 通话最长 5 分钟 */
-    public static final int MAX_CALL_SECONDS = 300;
+    /** 通话最长 10 分钟 */
+    public static final int MAX_CALL_SECONDS = 600;
 
-    public static final String END_WORDS = "感谢您的时间，祝您生活愉快，再见。";
+    public static final String END_WORDS = "好的，那先不打扰您了，祝您生活愉快，再见。";
 
     /** 客户明确拒接/勿扰时的结束语 */
     public static final String REFUSE_END_WORDS =
-            "好的，理解您的想法，那就不多打扰了，祝您生活愉快，再见。";
+            "好的，理解，那我先不打扰了，祝您生活愉快，再见。";
 
     /** 长时间静默无人应答时的结束语 */
     public static final String SILENCE_END_WORDS =
-            "不好意思，一直没听到您回应，我先不打扰了，祝您生活愉快，再见。";
+            "不好意思，好像一直没听到您说话，我先挂了，祝您生活愉快，再见。";
 
     /** TTS 限流/异常时播放（须已预合成结束语缓存） */
     public static final String TTS_FAILURE_END_WORDS =
-            "抱歉，线路有点忙，稍后工作人员再联系您，祝您生活愉快，再见。";
+            "抱歉，线路有点忙，稍后同事再联系您，祝您生活愉快，再见。";
 
     /** 超时结束：先说明情况再礼貌告别 */
     public static final String DURATION_END_WORDS =
-            "不好意思，本次通话已到五分钟，我先不打扰您了。如有需要欢迎随时联系我们，祝您生活愉快，再见。";
+            "不好意思，今天先聊到这儿，我先不打扰了，有需要随时联系我们，祝您生活愉快，再见。";
 
     private static final List<String> ABUSE_VULGAR_KEYWORDS = List.of(
             "傻逼", "傻b", "sb", "操你", "草你", "妈的", "他妈", "尼玛", "滚蛋", "滚开",
@@ -39,15 +39,32 @@ public final class ForcedHangupRules {
             "起诉", "告你们", "告你", "骗子", "诈骗", "骚扰电话", "违法", "侵权"
     );
 
-    /** 明确拒接、勿扰（不含单独「不需要」，避免与额度/用途回答混淆） */
-    private static final List<String> NO_DISTURB_KEYWORDS = List.of(
+    /**
+     * 软拒贷/暂无兴趣（应先挽回，禁止一上来就挂机）。
+     * 不含单独「不需要/不用」，避免与额度/用途回答混淆。
+     */
+    private static final List<String> SOFT_DECLINE_KEYWORDS = List.of(
             "不需要了", "我不需要", "没这个需要", "不感兴趣", "没兴趣", "不用了",
             "没有需求", "没需求", "没有这方面", "没这方面", "没这方面需求", "没有这方面需求",
-            "不贷款", "不用贷", "不用贷款", "不需要贷款",
-            "别打了", "不要再打", "别再打", "不要打", "别再联系", "不要联系", "别联系",
-            "别烦", "不要烦", "别再烦", "不要再打扰", "别打扰", "停止拨打", "停止联系",
-            "拉黑", "拒接", "骚扰", "不想听", "不想接", "别再联系我", "不要再来电"
+            "不贷款", "不用贷", "不用贷款", "不需要贷款", "不考虑", "暂时不需要", "暂时不用"
     );
+
+    /** 强硬勿扰：仅此类才允许规则直接挂机 */
+    private static final List<String> HARD_NO_DISTURB_KEYWORDS = List.of(
+            "别打了", "不要再打", "别再打", "不要打了", "别再联系", "不要联系", "别联系我",
+            "别烦", "不要烦", "别再烦", "不要再打扰", "别打扰", "停止拨打", "停止联系",
+            "拉黑", "拒接", "骚扰电话", "骚扰", "不想听了", "不想接了", "别再联系我", "不要再来电",
+            "再打报警", "再打投诉"
+    );
+
+    /** 兼容：软拒 + 硬勿扰（用于识别「在拒」；真正挂机只用硬勿扰） */
+    private static final List<String> NO_DISTURB_KEYWORDS;
+
+    static {
+        java.util.ArrayList<String> all = new java.util.ArrayList<>(SOFT_DECLINE_KEYWORDS);
+        all.addAll(HARD_NO_DISTURB_KEYWORDS);
+        NO_DISTURB_KEYWORDS = List.copyOf(all);
+    }
 
     private static final List<String> IDENTITY_INQUIRY_KEYWORDS = List.of(
             "哪里", "哪儿", "谁啊", "哪位", "什么公司", "哪家公司", "啥公司",
@@ -95,6 +112,18 @@ public final class ForcedHangupRules {
     private static final List<String> FAREWELL_KEYWORDS = List.of(
             "拜拜", "再见", "挂了", "先挂", "不聊了", "不说了", "先这样", "先不打扰",
             "就这样吧", "好了就这样", "谢谢不用", "不用谢谢", "可以挂了"
+    );
+
+    /**
+     * 旁白/第三人对话特征：客户在跟旁边的人说话，不是对本通 AI。
+     * 此类 ASR 禁止当告别/勿扰挂机，也勿推进主线。
+     */
+    private static final List<String> SIDE_TALK_KEYWORDS = List.of(
+            "你挂", "帮我挂", "给我挂", "你接", "你别接", "别接", "不接", "谁打的", "谁啊这",
+            "什么电话", "哪来的电话", "谁来的电话", "推销电话", "骚扰电话来了",
+            "跟他说", "你跟他", "你跟她", "我跟他说", "等下我", "等一下我",
+            "他在打电话", "她在打电话", "旁边", "你听我说", "我跟你说啊",
+            "挂掉吧", "挂断吧", "让他挂", "让她挂"
     );
 
     /** 1. 辱骂、脏话、投诉类 */
@@ -163,7 +192,7 @@ public final class ForcedHangupRules {
         return "非常抱歉给您带来困扰，我这边帮您登记备注，后续不会再打扰您，祝您生活愉快，再见！";
     }
 
-    /** 2. 明确希望不被打扰（有业务意向的短答不误判；加微信语境下「不用了」不算拒贷） */
+    /** 2. 软拒贷或勿扰意向（含软拒；加微信语境下「不用了」不算） */
     public static boolean wantsNoDisturbance(String text) {
         return wantsNoDisturbance(text, null);
     }
@@ -175,7 +204,10 @@ public final class ForcedHangupRules {
         if (declinesWeChatInvitationOnly(text, lastAssistantText)) {
             return false;
         }
-        if (containsAny(text, NO_DISTURB_KEYWORDS)) {
+        if (isHardNoDisturbance(text, lastAssistantText)) {
+            return true;
+        }
+        if (containsAny(text, SOFT_DECLINE_KEYWORDS)) {
             return true;
         }
         if (hasBusinessIntent(text)) {
@@ -183,6 +215,49 @@ public final class ForcedHangupRules {
         }
         String t = text.trim();
         return t.equals("不需要") || t.equals("不用") || t.startsWith("不需要，") || t.startsWith("不需要。");
+    }
+
+    /**
+     * 强硬勿扰才允许规则直接挂机。软拒（不用了/没需求/没有）应先挽回，勿挂。
+     */
+    public static boolean isHardNoDisturbance(String text) {
+        return isHardNoDisturbance(text, null);
+    }
+
+    public static boolean isHardNoDisturbance(String text, String lastAssistantText) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        if (isLikelySideTalk(text)) {
+            return false;
+        }
+        if (declinesWeChatInvitationOnly(text, lastAssistantText)) {
+            return false;
+        }
+        return containsAny(text, HARD_NO_DISTURB_KEYWORDS);
+    }
+
+    /** 软拒贷时的挽回话术（主线未就绪时使用） */
+    public static String softDeclineRecoveryReply() {
+        return "啊您别急着拒绝，现在利息真的很低，也可以先了解下您大概能贷多少。";
+    }
+
+    /** 听不懂/含糊时：换说法追问，禁止乱答或挂机 */
+    public static String unclearClarifyReply(String lastAssistantText) {
+        if (StringUtilsHasText(lastAssistantText)) {
+            String q = lastAssistantText.trim();
+            if (q.length() > 28) {
+                q = q.substring(Math.max(0, q.length() - 28));
+            }
+            if (q.contains("？") || q.contains("?") || q.contains("吗") || q.contains("呢")) {
+                return "不好意思没听清，麻烦您再说一遍好吗？";
+            }
+        }
+        return "不好意思刚才没听清，您方便再说一下吗？";
+    }
+
+    private static boolean StringUtilsHasText(String s) {
+        return s != null && !s.isBlank();
     }
 
     /**
@@ -341,7 +416,7 @@ public final class ForcedHangupRules {
                 || ai.contains("多少万") || ai.contains("多少资金") || ai.contains("期望额度");
     }
 
-    /** 3. 通话超过 5 分钟 */
+    /** 3. 通话超过上限时长 */
     public static boolean isCallDurationExceeded(int elapsedSeconds) {
         return elapsedSeconds >= MAX_CALL_SECONDS;
     }
@@ -408,6 +483,21 @@ public final class ForcedHangupRules {
         }
         return t.contains("公司") || t.contains("单位") || t.contains("你们")
                 || t.contains("办公") || t.contains("门店");
+    }
+
+    /** 客户抱怨 AI 反应慢/卡顿，应立刻道歉接话，禁止再空等大模型 */
+    public static boolean isLatencyComplaint(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String t = text.trim();
+        return t.contains("这么慢") || t.contains("讲话慢") || t.contains("说话慢")
+                || t.contains("反应慢") || t.contains("半天不") || t.contains("卡了")
+                || t.contains("卡住了") || t.contains("怎么这么慢") || t.contains("能不能快点");
+    }
+
+    public static String latencyComplaintReply() {
+        return "抱歉刚才卡了一下，您继续说，我听着呢。";
     }
 
     /** 用户明确在问 FAQ 时，槽位逻辑不应把回复改成额度/时间追问 */
@@ -528,9 +618,43 @@ public final class ForcedHangupRules {
         return false;
     }
 
+    /**
+     * 疑似旁白/第三人说话（非对本通客服）。
+     * 例：「你挂了吧」「谁打的电话」「别接」——禁止当客户告别挂机。
+     */
+    public static boolean isLikelySideTalk(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String t = text.trim();
+        if (containsAny(t, SIDE_TALK_KEYWORDS)) {
+            return true;
+        }
+        String n = t.replaceAll("[\\s，,。.!！?？~～]+", "");
+        // 「你/他/她 + 挂/接」指令旁人
+        if (n.matches(".*(你|他|她|别人).{0,4}(挂|接|别接|不接).*")
+                || n.matches(".*(挂|接).{0,4}(你|他|她).*")) {
+            // 排除对本通明确：「我要挂了」「那就挂了」等短告别另走 farewell
+            if (n.startsWith("我") && (n.contains("挂了") || n.contains("先挂"))) {
+                return false;
+            }
+            return true;
+        }
+        // 对旁人转述电话内容，而非回答问题
+        return n.contains("打电话的") || n.contains("来电话了") || n.contains("又打电话");
+    }
+
+    /** 旁白干扰时的轻量追问（不挂机、不推进主线） */
+    public static String sideTalkClarifyReply() {
+        return "您好，请问您这边方便接听吗？";
+    }
+
     /** 客户说再见、要挂机（含「88」等短告别） */
     public static boolean isUserFarewell(String text) {
         if (text == null || text.isBlank()) {
+            return false;
+        }
+        if (isLikelySideTalk(text)) {
             return false;
         }
         if (isNegatedFarewell(text)) {
@@ -540,10 +664,16 @@ public final class ForcedHangupRules {
         if (t.matches("88+") || t.equals("886")) {
             return true;
         }
-        if (t.equals("拜拜") || t.equals("再见") || t.equals("挂了") || t.equals("先挂")) {
+        if (t.equals("拜拜") || t.equals("再见") || t.equals("挂了") || t.equals("先挂")
+                || t.equals("我挂了") || t.equals("那就挂了") || t.equals("可以挂了")) {
             return true;
         }
         if (t.length() <= 2) {
+            return false;
+        }
+        // 长句仅当告别意图明确指向本通，避免旁白「你挂了吧」误伤（已在 isLikelySideTalk 拦截）
+        if (t.length() > 16 && !t.startsWith("再见") && !t.startsWith("拜拜")
+                && !t.contains("我挂") && !t.contains("先挂了") && !t.contains("不聊了")) {
             return false;
         }
         return containsAny(text, FAREWELL_KEYWORDS);

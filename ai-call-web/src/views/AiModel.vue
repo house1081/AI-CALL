@@ -20,11 +20,12 @@
       <el-form :model="voiceRuntime" label-width="160px">
         <el-form-item label="句末档位">
           <el-radio-group v-model="voiceRuntime.silenceProfile">
+            <el-radio value="balanced">均衡（450ms，默认）</el-radio>
             <el-radio value="stable">稳健（800ms，嘈杂移动线）</el-radio>
-            <el-radio value="fast">极速（680ms，安静固话）</el-radio>
+            <el-radio value="fast">极速（280ms，安静固话）</el-radio>
           </el-radio-group>
           <p class="voice-hint">
-            云端 semantic_vad + 本地 120ms 防抖；稳健阈值 0.35，极速阈值 0.30。任务可单独覆盖。
+            句末静音越短开口越快；嘈杂线路建议稳健。任务可单独覆盖。
           </p>
         </el-form-item>
         <el-form-item label="接通播报">
@@ -268,7 +269,7 @@ const list = ref([])
 const form = ref({ provider: 'ollama', maxTokens: 80, temperature: 0.7, maxHistoryRounds: 3 })
 
 const voiceRuntime = ref({
-  silenceProfile: 'stable',
+  silenceProfile: 'balanced',
   outboundDialogMode: 'ai_realtime',
   ttsVoiceMode: 'clone',
   cosyvoiceCloneVoiceId: '',
@@ -360,7 +361,7 @@ const saveOutboundMode = async () => {
   await request.post('/admin/voice-runtime/save', {
     outboundDialogMode: voiceRuntime.value.outboundDialogMode || 'ai_realtime',
     playOpeningOnAnswer: voiceRuntime.value.playOpeningOnAnswer,
-    silenceProfile: voiceRuntime.value.silenceProfile || 'stable',
+    silenceProfile: voiceRuntime.value.silenceProfile || 'balanced',
     ttsVoiceMode: voiceRuntime.value.ttsVoiceMode || 'clone',
     cosyvoiceCloneVoiceId: voiceRuntime.value.cosyvoiceCloneVoiceId,
     cosyvoiceSystemVoice: voiceRuntime.value.cosyvoiceSystemVoice
@@ -384,7 +385,7 @@ const savePrompt = async () => {
     await request.post('/admin/voice-runtime/save', {
       outboundDialogMode: 'smart_prerecord',
       playOpeningOnAnswer: voiceRuntime.value.playOpeningOnAnswer,
-      silenceProfile: voiceRuntime.value.silenceProfile || 'stable',
+      silenceProfile: voiceRuntime.value.silenceProfile || 'balanced',
       ttsVoiceMode: voiceRuntime.value.ttsVoiceMode || 'clone',
       cosyvoiceCloneVoiceId: voiceRuntime.value.cosyvoiceCloneVoiceId,
       cosyvoiceSystemVoice: voiceRuntime.value.cosyvoiceSystemVoice
@@ -509,7 +510,7 @@ const saveVoiceRuntime = async () => {
     }
   }
   await request.post('/admin/voice-runtime/save', {
-    silenceProfile: voiceRuntime.value.silenceProfile || 'stable',
+    silenceProfile: voiceRuntime.value.silenceProfile || 'balanced',
     ttsVoiceMode: mode,
     cosyvoiceCloneVoiceId: voiceRuntime.value.cosyvoiceCloneVoiceId,
     cosyvoiceSystemVoice: voiceRuntime.value.cosyvoiceSystemVoice,

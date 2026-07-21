@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 统一向 FreeSWITCH 通道播放音频（HTTP wav / tone / speak）。
@@ -41,6 +42,10 @@ public class VoicePlaybackService {
     private final ConcurrentHashMap<String, Object> channelPlayLocks = new ConcurrentHashMap<>();
     /** 当前播报起止，用于插嘴保护期（避免 TTS 回声误打断） */
     private final ConcurrentHashMap<String, PlaybackWindow> playbackWindows = new ConcurrentHashMap<>();
+    /** 本通已做过 EC/全双工准备的通道，避免每次播报重复 4 次 ESL */
+    private final ConcurrentHashMap<String, Boolean> channelPrepared = new ConcurrentHashMap<>();
+    /** 每通道共享 wav 序号，避免覆盖正在播放的文件 */
+    private final ConcurrentHashMap<String, AtomicLong> sharedWavSeq = new ConcurrentHashMap<>();
 
     /** park 通道上 uuid_execute 不可用（日志：Command not found），探测后跳过 */
     private volatile boolean uuidExecuteUnsupported;
@@ -54,6 +59,13 @@ public class VoicePlaybackService {
 
     /** 播放已合成的 wav 文件 */
     public boolean playSynthesizedWav(String fsUuid, Path wav) {
+        return playSynthesizedWav(fsUuid, wav, true);
+    }
+
+    /**
+     * @param stopFirst false 时用于流式补播尾巴，避免二次 stop+displace 产生卡顿接缝
+     */
+    public boolean playSynthesizedWav(String fsUuid, Path wav, boolean stopFirst) {
         if (!StringUtils.hasText(fsUuid) || wav == null) {
             return false;
         }
@@ -61,7 +73,9 @@ public class VoicePlaybackService {
             if (!eslService.uuidExists(fsUuid)) {
                 return false;
             }
-            stopChannelPlayback(fsUuid);
+            if (stopFirst) {
+                stopChannelPlayback(fsUuid);
+            }
             boolean ok = playExistingWavInternal(fsUuid, wav);
             if (ok) {
                 dialogTurnRegistry.markAiPlaybackStarted(fsUuid, "prerecord-wav");
@@ -173,27 +187,46 @@ public class VoicePlaybackService {
         if (!StringUtils.hasText(fsUuid) || !eslService.uuidExists(fsUuid)) {
             return;
         }
-        String path = sharedPlaybackPath(fsUuid);
+        PlaybackWindow w = playbackWindows.get(fsUuid.trim());
+        String path = w != null ? w.path() : null;
         eslService.api("uuid_break " + fsUuid + " all");
         if (StringUtils.hasText(path)) {
             eslService.api("uuid_displace " + fsUuid + " stop " + path);
         }
         eslService.api("uuid_displace " + fsUuid + " stop");
+        playbackWindows.remove(fsUuid.trim());
+    }
+
+    private String nextSharedPlaybackPath(String fsUuid) {
+        String dir = aiVoiceProperties.getFsSharedWavDir();
+        if (!StringUtils.hasText(dir)) {
+            dir = aiVoiceProperties.getFsTempWavDir();
+        }
+        String safeId = fsUuid.replace("-", "");
+        long seq = sharedWavSeq.computeIfAbsent(fsUuid.trim(), k -> new AtomicLong()).incrementAndGet();
+        return FsHostOs.joinRemotePath(dir, "aicall_" + safeId + "_" + seq + ".wav");
     }
 
     /**
-     * 按 FS 共享目录 wav 实际时长等待播报结束，并停止 displace。
+     * 按 FS 共享目录 wav 实际时长等待播报结束。
      *
+     * @param stopAtEnd false 时留给紧接着的补播，避免 stop→start 空档
      * @return true 表示客户插嘴打断
      */
     public boolean waitPlaybackFinished(String fsUuid, String text,
                                         java.util.function.BooleanSupplier bargeInPoll) throws Exception {
+        return waitPlaybackFinished(fsUuid, text, bargeInPoll, true);
+    }
+
+    public boolean waitPlaybackFinished(String fsUuid, String text,
+                                        java.util.function.BooleanSupplier bargeInPoll,
+                                        boolean stopAtEnd) throws Exception {
         if (!StringUtils.hasText(fsUuid) || !eslService.uuidExists(fsUuid)) {
             log.info("通道已结束，跳过等待 TTS uuid={}", fsUuid);
             return false;
         }
         long ms = estimatePlaybackMs(fsUuid, text);
-        log.info("等待 TTS 播完 uuid={} 约{}ms", fsUuid, ms);
+        log.info("等待 TTS 播完 uuid={} 约{}ms stopAtEnd={}", fsUuid, ms, stopAtEnd);
         long deadline = System.currentTimeMillis() + ms;
         while (System.currentTimeMillis() < deadline) {
             if (bargeInPoll != null && bargeInPoll.getAsBoolean()) {
@@ -206,7 +239,7 @@ public class VoicePlaybackService {
             }
             Thread.sleep(50);
         }
-        if (eslService.uuidExists(fsUuid)) {
+        if (stopAtEnd && eslService.uuidExists(fsUuid)) {
             stopChannelPlayback(fsUuid);
             Thread.sleep(Math.max(0, aiVoiceProperties.getPlaybackPostStopMs()));
         }
@@ -248,6 +281,8 @@ public class VoicePlaybackService {
             path = FsHostOs.normalizeLocalPlaybackPath(path);
             String media = buildPlaybackMedia(path);
             if (broadcastRaw(fsUuid, media, "opening-broadcast")) {
+                // broadcast 成功也必须登记时长，否则 wait 会按字数估短并提前 stop 掐断开场白
+                markPlaybackStarted(fsUuid, path);
                 log.info("[开场白] uuid_broadcast 已下发 uuid={}", fsUuid);
                 return true;
             }
@@ -272,6 +307,7 @@ public class VoicePlaybackService {
                     fsUuid, fsPath, Files.size(target));
             String media = buildPlaybackMedia(fsPath);
             if (broadcastRaw(fsUuid, media, "opening-fs-shared")) {
+                markPlaybackStarted(fsUuid, target.toAbsolutePath().toString().replace('\\', '/'));
                 return true;
             }
             return playFileOnChannel(fsUuid, fsPath, "opening-fs-displace");
@@ -282,11 +318,22 @@ public class VoicePlaybackService {
     }
 
     public long estimatePlaybackMs(String fsUuid, String text) {
-        int tail = Math.max(50, aiVoiceProperties.getPlaybackTailBufferMs());
+        int tail = Math.max(80, aiVoiceProperties.getPlaybackTailBufferMs());
         try {
-            Path shared = Path.of(sharedPlaybackPath(fsUuid).replace('/', '\\'));
-            if (Files.exists(shared) && Files.size(shared) > 44) {
-                return (long) (WavDurationUtil.durationSeconds(shared) * 1000) + tail;
+            PlaybackWindow w = StringUtils.hasText(fsUuid) ? playbackWindows.get(fsUuid.trim()) : null;
+            if (w != null && StringUtils.hasText(w.path())) {
+                Path active = Path.of(w.path().replace('/', '\\'));
+                if (Files.exists(active) && Files.size(active) > 44) {
+                    // 始终按 wav 真实时长算剩余，避免字数估算偏短把开场白掐断
+                    long fileMs = (long) (WavDurationUtil.durationSeconds(active) * 1000) + Math.max(tail, 300);
+                    long remaining = fileMs - (System.currentTimeMillis() - w.startMs);
+                    return Math.max(250L, remaining);
+                }
+            }
+            // 摘机即播后窗口偶发丢失：按共享目录开场白文件补算
+            long openingMs = estimateOpeningSharedWavMs(fsUuid, tail);
+            if (openingMs > 0) {
+                return openingMs;
             }
         } catch (Exception ignored) {
         }
@@ -302,12 +349,30 @@ public class VoicePlaybackService {
         return Math.min(ms, 20000);
     }
 
-    private String sharedPlaybackPath(String fsUuid) {
-        String dir = aiVoiceProperties.getFsSharedWavDir();
-        if (!StringUtils.hasText(dir)) {
-            dir = aiVoiceProperties.getFsTempWavDir();
+    /** 开场白共享 wav（aicall_{uuid}.wav）真实剩余时长；无文件返回 0 */
+    private long estimateOpeningSharedWavMs(String fsUuid, int tail) {
+        if (!StringUtils.hasText(fsUuid)) {
+            return 0;
         }
-        return FsHostOs.joinRemotePath(dir, "aicall_" + fsUuid.replace("-", "") + ".wav");
+        String shared = aiVoiceProperties.getFsSharedWavDir();
+        if (!StringUtils.hasText(shared)) {
+            return 0;
+        }
+        try {
+            Path p = Path.of(shared.replace('/', '\\'), "aicall_" + fsUuid.replace("-", "") + ".wav");
+            if (!Files.exists(p) || Files.size(p) <= 44) {
+                return 0;
+            }
+            long fileMs = (long) (WavDurationUtil.durationSeconds(p) * 1000) + Math.max(tail, 300);
+            PlaybackWindow w = playbackWindows.get(fsUuid.trim());
+            if (w != null) {
+                return Math.max(250L, fileMs - (System.currentTimeMillis() - w.startMs));
+            }
+            // 无窗口时保守按全长等待（开场白刚下发）
+            return Math.min(fileMs, 30000L);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private boolean playExistingWavInternal(String fsUuid, Path wav) {
@@ -390,6 +455,8 @@ public class VoicePlaybackService {
             String id = fsUuid.trim();
             channelPlayLocks.remove(id);
             playbackWindows.remove(id);
+            channelPrepared.remove(id);
+            sharedWavSeq.remove(id);
         }
     }
 
@@ -437,9 +504,8 @@ public class VoicePlaybackService {
      * 将 wav 放到 FS 本机后播放：优先 ESL 推送（不依赖 FS→Java HTTP），失败再 curl。
      */
     private boolean tryFsLocalFilePlay(String fsUuid, Path localWav) {
-        String safeId = fsUuid.replace("-", "");
         String dir = aiVoiceProperties.getFsTempWavDir();
-        String remotePath = FsHostOs.joinRemotePath(dir, "aicall_" + safeId + ".wav");
+        String remotePath = nextSharedPlaybackPath(fsUuid);
         if (tryFsSharedDirCopy(fsUuid, localWav, remotePath)) {
             return true;
         }
@@ -545,6 +611,10 @@ public class VoicePlaybackService {
         if (!eslService.uuidExists(fsUuid)) {
             return;
         }
+        String id = fsUuid.trim();
+        if (channelPrepared.putIfAbsent(id, Boolean.TRUE) != null) {
+            return;
+        }
 
         eslService.api("uuid_setvar " + fsUuid + " enable_ec true");
         eslService.api("uuid_setvar " + fsUuid + " ec_delay 60");
@@ -589,12 +659,12 @@ public class VoicePlaybackService {
             return;
         }
         long est = estimateMsForFile(filePath);
-        playbackWindows.put(fsUuid.trim(), new PlaybackWindow(System.currentTimeMillis(), est));
+        playbackWindows.put(fsUuid.trim(), new PlaybackWindow(System.currentTimeMillis(), est, filePath));
         callSessionRecordService.markBargeInBaseline(fsUuid);
     }
 
     private long estimateMsForFile(String filePath) {
-        int tail = Math.max(50, aiVoiceProperties.getPlaybackTailBufferMs());
+        int tail = Math.max(80, aiVoiceProperties.getPlaybackTailBufferMs());
         try {
             Path p = Path.of(filePath.replace('/', '\\'));
             if (Files.exists(p) && Files.size(p) > 44) {
@@ -605,7 +675,7 @@ public class VoicePlaybackService {
         return 3000L;
     }
 
-    private record PlaybackWindow(long startMs, long estimatedMs) {
+    private record PlaybackWindow(long startMs, long estimatedMs, String path) {
     }
 
     /** 外呼 park：解除静音并确认媒体已建立，避免 displace/broadcast 无声 */

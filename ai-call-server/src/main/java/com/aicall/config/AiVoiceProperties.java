@@ -167,8 +167,16 @@ public class AiVoiceProperties {
     private boolean dialogLlmStreamTts = false;
     /** 流式首句 TTS 触发字数（小于 max-speak-chars，更快开口） */
     private int streamTtsFirstChunkChars = 14;
-    /** 独立线程池调用大模型最长等待（秒） */
+    /**
+     * 独立线程池仅等待「大模型生成」的最长秒数（不含 TTS/播报）。
+     * TTS 在超时之外执行，避免假超时播「系统无法解答」。
+     */
     private int dialogLlmTimeoutSec = 55;
+    /**
+     * 流式首句开播超时（秒）：超时仍无首句则中断 LLM，走主线/槽位兜底。
+     * 0=关闭 TTFT 门控，仅受 dialog-llm-timeout-sec 约束。
+     */
+    private int dialogLlmTtftTimeoutSec = 4;
     /** 外呼对话 LLM 线程池大小 */
     private int dialogLlmPoolSize = 6;
     /** 分段模式：客户长时间无有效 ASR 时主动 gentle 询问 */

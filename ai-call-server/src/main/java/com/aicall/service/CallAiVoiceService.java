@@ -44,6 +44,13 @@ public class CallAiVoiceService {
         return t;
     });
 
+    /** 尾巴预合成与首句播放并行，不抢 stream-tts 单线程 */
+    private static final Executor STREAM_TTS_SYNTH_EXECUTOR = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "stream-tts-synth");
+        t.setDaemon(true);
+        return t;
+    });
+
     private static final Executor REPLY_CACHE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "reply-cache-store");
         t.setDaemon(true);
@@ -93,10 +100,7 @@ public class CallAiVoiceService {
             return blocked;
         }
         try {
-            // 外呼通话：始终带超时走独立线程池，避免 dialog-loop 被 LLM 长时间阻塞导致「说完就卡住」
-            if (req.getCallRecordId() != null || aiVoiceProperties.isDialogLlmAsync()) {
-                return dialogLlmExecutorService.run(() -> voiceTurnInternal(req));
-            }
+            // TTS/播报在超时外执行；仅 chat 受 dialog-llm-timeout-sec 约束（见 voiceTurnDialog）
             return voiceTurnInternal(req);
         } catch (TtsSynthesisException e) {
             throw e;
@@ -111,6 +115,14 @@ public class CallAiVoiceService {
 
     private AiChatResponse voiceTurnWithLiveFallback(AiChatRequest req) {
         try {
+            // 可能已有流式首句在播，先停再兜底，避免叠音
+            if (StringUtils.hasText(req.getFsUuid()) && freeSwitchProperties.isEnabled()) {
+                try {
+                    voicePlaybackService.stopChannelPlayback(req.getFsUuid());
+                } catch (Exception stopEx) {
+                    log.debug("[LLM] 兜底前停播忽略 uuid={}: {}", req.getFsUuid(), stopEx.getMessage());
+                }
+            }
             AiChatResponse fallback = ollamaChatService.buildLiveCallSlotResponse(req);
             fallback.setStreamedTtsPlayed(false);
             String reply = fallback.getReply();
@@ -170,25 +182,87 @@ public class CallAiVoiceService {
         AtomicBoolean streamTtsStarted = new AtomicBoolean(false);
         AtomicReference<String> streamTtsPrefix = new AtomicReference<>("");
         AtomicReference<CompletableFuture<Void>> streamFirstPlayFuture = new AtomicReference<>();
-        Consumer<String> onSentence = null;
+        final java.util.function.Predicate<String> onFirstChunk;
         if (aiVoiceProperties.isDialogLlmStream() && aiVoiceProperties.isDialogLlmStreamTts()
                 && req.getCallRecordId() != null && shouldPlayOnChannel(req.getFsUuid())) {
-            onSentence = sentence -> {
+            onFirstChunk = sentence -> {
                 if (!StringUtils.hasText(sentence) || !streamTtsStarted.compareAndSet(false, true)) {
-                    return;
+                    return false;
                 }
-                String chunk = SpeakTextLimiter.limit(sentence.trim(), aiVoiceProperties.getMaxSpeakChars());
+                // 与 playText 同一套规范化，避免首句原文与最终润色全文错位
+                String chunk = OralScriptNormalizer.normalize(
+                        SpeakTextLimiter.limit(sentence.trim(), aiVoiceProperties.getMaxSpeakChars()));
+                // 禁止「行/好/嗯」等弱承接抢先开播
+                if (!StringUtils.hasText(chunk) || isWeakAckOnly(chunk) || chunk.length() < 6) {
+                    streamTtsStarted.set(false);
+                    return false;
+                }
                 streamTtsPrefix.set(chunk);
                 log.info("[对话TTS] 流式首句开播 uuid={} 距回合开始{}ms len={}",
                         req.getFsUuid(), System.currentTimeMillis() - turnStart, chunk.length());
                 String fsUuid = req.getFsUuid();
                 streamFirstPlayFuture.set(CompletableFuture.runAsync(() -> playText(fsUuid, chunk), STREAM_TTS_EXECUTOR));
+                return true;
             };
+        } else {
+            onFirstChunk = null;
         }
-        AiChatResponse r = ollamaChatService.chat(req, onSentence);
+        AiChatResponse r;
+        try {
+            if (req.getCallRecordId() != null || aiVoiceProperties.isDialogLlmAsync()) {
+                // 超时只包 LLM；流式首句 TTS 在回调里异步开播，尾巴/整段播报在超时外
+                r = dialogLlmExecutorService.run(() -> ollamaChatService.chat(req, onFirstChunk));
+            } else {
+                r = ollamaChatService.chat(req, onFirstChunk);
+            }
+        } catch (TimeoutException e) {
+            // 已流式开口：收尾已播内容，勿再播另一套兜底造成叠音/跳戏
+            if (streamTtsStarted.get() && StringUtils.hasText(streamTtsPrefix.get())) {
+                log.warn("[LLM] 大模型超时但首句已开播，按前缀收尾 uuid={} prefixLen={}",
+                        req.getFsUuid(), streamTtsPrefix.get().length());
+                awaitStreamPrefixDone(req.getFsUuid(), true, streamTtsPrefix.get(),
+                        streamFirstPlayFuture.get());
+                AiChatResponse partial = new AiChatResponse();
+                partial.setReply(streamTtsPrefix.get().trim());
+                partial.setModel("llm-timeout-stream-prefix");
+                partial.setStreamedTtsPlayed(true);
+                partial.setPlaybackWaitHandled(true);
+                DialogTranscriptLog.aiReply(req.getCallRecordId(), req.getFsUuid(),
+                        partial.getReply(), partial.getModel(), false);
+                return partial;
+            }
+            throw e;
+        }
         String toPlay = Boolean.TRUE.equals(r.getShouldHangup()) && StringUtils.hasText(r.getEndWords())
                 ? r.getEndWords() : r.getReply();
         toPlay = dedupeAgainstLastAssistant(toPlay, req);
+        if (StringUtils.hasText(toPlay)) {
+            toPlay = OralScriptNormalizer.normalize(
+                    SpeakTextLimiter.limit(toPlay.trim(), aiVoiceProperties.getMaxSpeakChars()));
+        }
+        // 已流式开播：前缀与润色全文错位时
+        // - 弱承接/过短前缀：停掉前缀，整段播全文（避免只说「行」就沉默）
+        // - 其它：按前缀收尾，避免叠音重播
+        if (streamTtsStarted.get() && StringUtils.hasText(streamTtsPrefix.get())
+                && StringUtils.hasText(toPlay)
+                && !StreamTtsRemainder.canContinueFromPrefix(toPlay, streamTtsPrefix.get())) {
+            String prefix = streamTtsPrefix.get().trim();
+            if (isWeakAckOnly(prefix) || prefix.length() < 6) {
+                log.info("[对话TTS] 弱/短首句与全文错位，整段重播 uuid={} prefix={} fullLen={}",
+                        req.getFsUuid(), prefix, toPlay.length());
+                try {
+                    awaitStreamPrefixDone(req.getFsUuid(), true, prefix, streamFirstPlayFuture.get());
+                } catch (Exception ignore) {
+                    // 继续整段重播
+                }
+                streamTtsStarted.set(false);
+                streamTtsPrefix.set("");
+            } else {
+                log.info("[对话TTS] 润色与首句错位，按已播前缀收尾 uuid={} prefixLen={}",
+                        req.getFsUuid(), prefix.length());
+                toPlay = prefix;
+            }
+        }
         if (StringUtils.hasText(toPlay)) {
             DialogTranscriptLog.aiReply(req.getCallRecordId(), req.getFsUuid(), toPlay, r.getModel(), r.getShouldHangup());
         } else {
@@ -199,7 +273,12 @@ public class CallAiVoiceService {
         if (aiVoiceProperties.isEnabled() && StringUtils.hasText(req.getFsUuid())) {
             if (shouldPlayOnChannel(req.getFsUuid())) {
                 if (Boolean.TRUE.equals(r.getShouldHangup()) && StringUtils.hasText(r.getEndWords())) {
-                    playFixedEnding(req.getFsUuid(), req.getCallRecordId(), r.getEndWords());
+                    // 挂机前先收束流式首句，避免打断中途
+                    awaitStreamPrefixDone(req.getFsUuid(), streamTtsStarted.get(),
+                            streamTtsPrefix.get(), streamFirstPlayFuture.get());
+                    playFixedEnding(req.getFsUuid(), req.getCallRecordId(),
+                            OralScriptNormalizer.normalize(r.getEndWords().trim()));
+                    r.setPlaybackWaitHandled(true);
                 } else if (streamTtsStarted.get()) {
                     playStreamTtsTail(req.getFsUuid(), toPlay, streamTtsPrefix.get(), streamFirstPlayFuture.get());
                     r.setPlaybackWaitHandled(true);
@@ -214,6 +293,26 @@ public class CallAiVoiceService {
             }
         }
         return r;
+    }
+
+    private void awaitStreamPrefixDone(String fsUuid, boolean started, String prefix,
+                                       CompletableFuture<Void> firstPlayFuture) throws Exception {
+        if (!started) {
+            return;
+        }
+        if (firstPlayFuture != null) {
+            try {
+                firstPlayFuture.join();
+            } catch (CompletionException e) {
+                TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+                if (tts != null) {
+                    throw tts;
+                }
+            }
+        }
+        if (StringUtils.hasText(prefix) && shouldPlayOnChannel(fsUuid)) {
+            voicePlaybackService.waitPlaybackFinished(fsUuid, prefix, null, true);
+        }
     }
 
     private Optional<AiChatResponse> tryReplyAudioCache(AiChatRequest req, long turnStart) {
@@ -328,6 +427,21 @@ public class CallAiVoiceService {
         return StringUtils.hasText(alt) ? alt : reply;
     }
 
+    /** 「行/好/嗯」等弱承接：不足以单独作为电话回合回复 */
+    static boolean isWeakAckOnly(String text) {
+        if (!StringUtils.hasText(text)) {
+            return true;
+        }
+        String n = text.trim().replaceAll("[\\s，,。.!！?？~～、；;]+", "");
+        if (n.isEmpty()) {
+            return true;
+        }
+        return n.equals("行") || n.equals("好") || n.equals("好的") || n.equals("嗯") || n.equals("嗯嗯")
+                || n.equals("哦") || n.equals("哦哦") || n.equals("啊") || n.equals("明白")
+                || n.equals("了解") || n.equals("记下了") || n.equals("好嘞") || n.equals("可以")
+                || n.equals("收到") || n.equals("OK") || n.equalsIgnoreCase("ok");
+    }
+
     private static String lastAssistantFromHistory(List<AiChatMessage> history) {
         if (history == null) {
             return "";
@@ -341,22 +455,35 @@ public class CallAiVoiceService {
         return "";
     }
 
-    /** 首句流式已播：等首句结束再分段补播剩余，并在本方法内等待全部播完 */
+    /** 首句流式已播：对齐最终全文后补播尾巴；错位则整段重播避免叠音 */
     private void playStreamTtsTail(String fsUuid, String fullReply, String streamedPrefix,
                                    CompletableFuture<Void> firstPlayFuture) throws Exception {
-        if (firstPlayFuture != null) {
-            try {
-                firstPlayFuture.join();
-            } catch (CompletionException e) {
-                TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
-                if (tts != null) {
-                    throw tts;
-                }
-                throw e;
-            }
-        }
         String prefix = streamedPrefix != null ? streamedPrefix.trim() : "";
-        String remainder = StreamTtsRemainder.unplayed(fullReply, prefix);
+        String full = fullReply != null ? fullReply.trim() : "";
+        if (!StringUtils.hasText(full)) {
+            awaitStreamPrefixDone(fsUuid, StringUtils.hasText(prefix), prefix, firstPlayFuture);
+            return;
+        }
+
+        // 润色后与已播前缀错位：停掉前缀，整段重播一次
+        if (StringUtils.hasText(prefix) && !StreamTtsRemainder.canContinueFromPrefix(full, prefix)) {
+            log.warn("[对话TTS] 首句与最终全文错位，整段重播 uuid={} prefixLen={} fullLen={}",
+                    fsUuid, prefix.length(), full.length());
+            awaitStreamPrefixDone(fsUuid, true, prefix, firstPlayFuture);
+            if (shouldPlayOnChannel(fsUuid)) {
+                playText(fsUuid, full);
+                voicePlaybackService.waitPlaybackFinished(fsUuid, full, null, true);
+            }
+            return;
+        }
+
+        String remainder = StreamTtsRemainder.unplayed(full, prefix);
+        if (StringUtils.hasText(remainder)
+                && remainder.replaceAll("[\\s，,。.!！?？~～]+", "").isEmpty()) {
+            remainder = "";
+        }
+
+        // 尾巴预合成与首句播放并行（独立线程池，不堵在 stream-tts 上）
         CompletableFuture<Path> remainderWavFuture = null;
         if (StringUtils.hasText(remainder) && shouldPlayOnChannel(fsUuid)) {
             String rem = remainder;
@@ -369,13 +496,28 @@ public class CallAiVoiceService {
                     }
                     throw new CompletionException(e);
                 }
-            }, STREAM_TTS_EXECUTOR);
+            }, STREAM_TTS_SYNTH_EXECUTOR);
         }
+
+        if (firstPlayFuture != null) {
+            try {
+                firstPlayFuture.join();
+            } catch (CompletionException e) {
+                TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
+                if (tts != null) {
+                    throw tts;
+                }
+                throw e;
+            }
+        }
+
+        boolean hasRemainder = StringUtils.hasText(remainder);
         if (StringUtils.hasText(prefix)) {
-            log.info("[对话TTS] 等待流式首句播完 uuid={} len={}", fsUuid, prefix.length());
-            voicePlaybackService.waitPlaybackFinished(fsUuid, prefix, null);
+            log.info("[对话TTS] 等待流式首句播完 uuid={} len={} hasTail={}",
+                    fsUuid, prefix.length(), hasRemainder);
+            voicePlaybackService.waitPlaybackFinished(fsUuid, prefix, null, !hasRemainder);
         }
-        if (!StringUtils.hasText(remainder)) {
+        if (!hasRemainder) {
             if (remainderWavFuture != null) {
                 remainderWavFuture.cancel(true);
             }
@@ -393,7 +535,8 @@ public class CallAiVoiceService {
         if (remainderWavFuture != null) {
             try {
                 Path wav = remainderWavFuture.join();
-                played = voicePlaybackService.playSynthesizedWav(fsUuid, wav);
+                // 独立序号 wav，stop 后再播不会覆盖正在读的文件
+                played = voicePlaybackService.playSynthesizedWav(fsUuid, wav, true);
             } catch (CompletionException e) {
                 TtsSynthesisException tts = TtsSynthesisException.unwrap(e);
                 if (tts != null) {
@@ -405,7 +548,7 @@ public class CallAiVoiceService {
         if (!played) {
             playText(fsUuid, remainder);
         }
-        voicePlaybackService.waitPlaybackFinished(fsUuid, remainder, null);
+        voicePlaybackService.waitPlaybackFinished(fsUuid, remainder, null, true);
     }
 
     /** 固定结束语：仅播预录音，不调 TTS */

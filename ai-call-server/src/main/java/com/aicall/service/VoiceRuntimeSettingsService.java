@@ -97,10 +97,22 @@ public class VoiceRuntimeSettingsService {
     public int resolveAsrVadSilenceMs(String fsUuid) {
         int profileMs = resolveUserSilenceMs(fsUuid);
         int configured = aiVoiceProperties.getAsrVadSilenceMs();
-        if (configured > 0 && configured < profileMs) {
-            return configured;
+        // 句末静音取档位与 yml 的较大值，避免 noisy 线被 yml 的短静音覆盖
+        if (configured > 0) {
+            return Math.max(profileMs, configured);
         }
         return profileMs;
+    }
+
+    /**
+     * 本地 VAD 能量阈值：yml 基数 × 档位系数（stable 更高，抗杂音）。
+     */
+    public int resolveAsrVadEnergy(String fsUuid) {
+        int base = Math.max(80, aiVoiceProperties.getAsrVadEnergyThreshold());
+        SilenceProfile.Params p = silenceParamsForCall(fsUuid);
+        // fast=0.26 → 1.0x；stable=0.35 → ≈1.35x
+        double scale = Math.max(1.0, p.vadThreshold() / 0.26);
+        return (int) Math.round(base * scale);
     }
 
     public String getCosyvoiceCloneVoiceId() {

@@ -60,6 +60,24 @@ class ForcedHangupRulesTest {
     }
 
     @Test
+    void hardNoDisturbance_onlyStrongPhrases() {
+        assertTrue(ForcedHangupRules.isHardNoDisturbance("别再打了"));
+        assertTrue(ForcedHangupRules.isHardNoDisturbance("不要再打扰我"));
+        assertFalse(ForcedHangupRules.isHardNoDisturbance("没有这方面需求"));
+        assertFalse(ForcedHangupRules.isHardNoDisturbance("不用了"));
+        assertFalse(ForcedHangupRules.isHardNoDisturbance("没有"));
+        assertTrue(ForcedHangupRules.declinesFundingNeed("没有", "您最近有没有资金备用或者转贷的打算？"));
+        assertFalse(ForcedHangupRules.isHardNoDisturbance("没有", "您最近有没有资金备用或者转贷的打算？"));
+    }
+
+    @Test
+    void unclearClarifyReply_notEmpty() {
+        assertTrue(ForcedHangupRules.unclearClarifyReply("那您名下有车吗？").contains("听清"));
+        assertTrue(ForcedHangupRules.softDeclineRecoveryReply().contains("了解")
+                || ForcedHangupRules.softDeclineRecoveryReply().contains("利息"));
+    }
+
+    @Test
     void openingFundingIntent_positiveAdvancesMainFlow() {
         String opening = "您最近有没有资金备用或者转贷的打算？";
         assertTrue(ForcedHangupRules.isOpeningFundingIntentQuestion(opening));
@@ -78,6 +96,21 @@ class ForcedHangupRulesTest {
         assertTrue(ForcedHangupRules.declinesOpeningFundingIntent("暂时没有", opening));
         assertTrue(ForcedHangupRules.declinesOpeningFundingIntent("现在用不上", opening));
         assertFalse(ForcedHangupRules.acceptsOpeningFundingIntent("没这个打算"));
+    }
+
+    @Test
+    void sideTalk_notTreatedAsFarewellOrHardHangup() {
+        assertTrue(ForcedHangupRules.isLikelySideTalk("你挂了吧"));
+        assertTrue(ForcedHangupRules.isLikelySideTalk("谁打的电话"));
+        assertTrue(ForcedHangupRules.isLikelySideTalk("别接"));
+        assertTrue(ForcedHangupRules.isLikelySideTalk("帮我挂掉"));
+        assertFalse(ForcedHangupRules.isUserFarewell("你挂了吧"));
+        assertFalse(ForcedHangupRules.isUserFarewell("谁打的电话啊挂了吧"));
+        assertFalse(ForcedHangupRules.isHardNoDisturbance("别接这个电话"));
+        assertTrue(ForcedHangupRules.isUserFarewell("再见"));
+        assertTrue(ForcedHangupRules.isUserFarewell("我挂了"));
+        assertTrue(ForcedHangupRules.isUserFarewell("挂了"));
+        assertTrue(ForcedHangupRules.sideTalkClarifyReply().contains("方便"));
     }
 
     @Test

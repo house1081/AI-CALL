@@ -34,7 +34,7 @@ import java.util.concurrent.Executors;
 public class EndingVoiceCacheService {
 
     private static final String LOOP_END_WORDS =
-            "好的，今天先聊到这儿，有需要随时联系我们，祝您生活愉快，再见。";
+            "好的，今天先这样，有需要随时找我们，祝您生活愉快，再见。";
 
     private static final String KEY_TTS_FAILURE = "tts_fail";
 

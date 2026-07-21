@@ -152,7 +152,7 @@ public class LlmInvokeService {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(Math.max(30, cfg.getReadTimeoutMs() / 1000)))
+                    .timeout(Duration.ofSeconds(streamHttpTimeoutSec(cfg)))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
                     .build();
@@ -164,6 +164,9 @@ public class LlmInvokeService {
                     new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new BizException("大模型调用已取消");
+                    }
                     if (!StringUtils.hasText(line)) {
                         continue;
                     }
@@ -180,6 +183,9 @@ public class LlmInvokeService {
             }
         } catch (BizException e) {
             throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BizException("大模型调用已取消");
         } catch (Exception e) {
             throw new BizException("Ollama 流式调用失败: " + e.getMessage());
         }
@@ -199,6 +205,9 @@ public class LlmInvokeService {
                 return chatQwenStreamOnce(messages, cfg, onDelta);
             } catch (BizException e) {
                 throw e;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new BizException("大模型调用已取消");
             } catch (Exception e) {
                 last = e;
                 if (attempt < maxAttempts && isRetryableNetwork(e)) {
@@ -207,7 +216,7 @@ public class LlmInvokeService {
                         Thread.sleep(500L * attempt);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        break;
+                        throw new BizException("大模型调用已取消");
                     }
                 }
             }
@@ -252,7 +261,7 @@ public class LlmInvokeService {
         StringBuilder full = new StringBuilder();
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(Math.max(30, cfg.getReadTimeoutMs() / 1000)))
+                .timeout(Duration.ofSeconds(streamHttpTimeoutSec(cfg)))
                 .header("Authorization", "Bearer " + cfg.getApiKey().trim())
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
@@ -266,6 +275,9 @@ public class LlmInvokeService {
                 new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new BizException("大模型调用已取消");
+                }
                 if (!line.startsWith("data:")) {
                     continue;
                 }
@@ -286,6 +298,12 @@ public class LlmInvokeService {
             }
         }
         return full.toString();
+    }
+
+    private static int streamHttpTimeoutSec(AiModelConfig cfg) {
+        int ms = cfg.getReadTimeoutMs() != null && cfg.getReadTimeoutMs() > 0
+                ? cfg.getReadTimeoutMs() : 10000;
+        return Math.max(5, Math.min(120, ms / 1000));
     }
 
     private String chatWenxin(List<Map<String, String>> messages, AiModelConfig cfg) {

@@ -96,6 +96,27 @@ public class DialogMainFlowService {
         return nextMainLineAfterUser(callRecordId, userText, null);
     }
 
+    /**
+     * 窥探：若本轮推进主线会播什么（不改 step / 标志位）。
+     * AI 实时模式先 peek 注入 LLM，应答成功后再 {@link #commitAdvanceAfterReply}。
+     */
+    public String peekNextScript(Integer callRecordId, String userText, String lastAssistantText) {
+        if (callRecordId == null) {
+            return null;
+        }
+        CallFlowSnapshot snap = snapshot(callRecordId);
+        try {
+            return nextMainLineAfterUser(callRecordId, userText, lastAssistantText);
+        } finally {
+            restore(callRecordId, snap);
+        }
+    }
+
+    /** LLM 本轮应答成功后，真正推进主线状态 */
+    public String commitAdvanceAfterReply(Integer callRecordId, String userText, String lastAssistantText) {
+        return nextMainLineAfterUser(callRecordId, userText, lastAssistantText);
+    }
+
     public String nextMainLineAfterUser(Integer callRecordId, String userText, String lastAssistantText) {
         if (callRecordId == null) {
             return null;
@@ -178,6 +199,50 @@ public class DialogMainFlowService {
         }
         callStep.put(callRecordId, next);
         return scriptRegistry.mainFlowScript(next, kbId);
+    }
+
+    private CallFlowSnapshot snapshot(Integer callRecordId) {
+        return new CallFlowSnapshot(
+                callStep.get(callRecordId),
+                refuseStreak.get(callRecordId),
+                businessUser.get(callRecordId),
+                homemakerUser.get(callRecordId),
+                propertyPath.get(callRecordId),
+                socialDenied.get(callRecordId),
+                callKbId.get(callRecordId)
+        );
+    }
+
+    private void restore(Integer callRecordId, CallFlowSnapshot snap) {
+        if (snap == null || callRecordId == null) {
+            return;
+        }
+        putOrRemove(callStep, callRecordId, snap.step());
+        putOrRemove(refuseStreak, callRecordId, snap.refuseStreak());
+        putOrRemove(businessUser, callRecordId, snap.businessUser());
+        putOrRemove(homemakerUser, callRecordId, snap.homemakerUser());
+        putOrRemove(propertyPath, callRecordId, snap.propertyPath());
+        putOrRemove(socialDenied, callRecordId, snap.socialDenied());
+        putOrRemove(callKbId, callRecordId, snap.kbId());
+    }
+
+    private static <V> void putOrRemove(Map<Integer, V> map, Integer key, V value) {
+        if (value == null) {
+            map.remove(key);
+        } else {
+            map.put(key, value);
+        }
+    }
+
+    private record CallFlowSnapshot(
+            String step,
+            Integer refuseStreak,
+            Boolean businessUser,
+            Boolean homemakerUser,
+            Boolean propertyPath,
+            Boolean socialDenied,
+            Integer kbId
+    ) {
     }
 
     public void restoreStep(Integer callRecordId, String step) {
