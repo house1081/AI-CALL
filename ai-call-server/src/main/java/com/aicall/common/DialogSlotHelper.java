@@ -25,34 +25,34 @@ public final class DialogSlotHelper {
     private static final Pattern BARE_DIGIT_WAN = Pattern.compile("^(\\d{1,3})$");
 
     private static final String[] AMOUNT_FIRST = {
-            "那您这边大概想贷多少万呢？",
-            "方便说下期望额度吗，大概多少万？"
+            "那您大概想用多少呢？",
+            "大概多少万就行，您说个数我记一下。"
     };
     private static final String[] AMOUNT_REPHRASE = {
-            "您方便再说下期望额度吗，大概多少万？",
-            "没事，您大概想申请多少万的，我帮您记下来。"
+            "额度这边再说下就行，大概多少万？",
+            "没事，您大概想贷多少，我帮您记一下。"
     };
     private static final String[] TIME_FIRST = {
-            "您打算大概什么时候用这笔钱呢？",
-            "时间上急不急，大概哪段时间要用？"
+            "这块大概啥时候用呀？",
+            "时间上急不急，最近还是还能等等？"
     };
     private static final String[] TIME_REPHRASE = {
-            "时间上我再跟您确认下，是最近就要，还是还能等等？",
-            "您说下大概啥时候用，本月还是下个月都行。"
+            "时间我再跟您对一下，是最近就要，还是不着急？",
+            "大概啥时候用，这个月还是下个月都行。"
     };
     private static final String[] PURPOSE_FIRST = {
-            "主要是个人周转用，还是公司经营用呢？",
-            "这笔款是个人消费方面，还是生意周转呀？"
+            "主要是个人周转，还是公司经营用呢？",
+            "这笔是自己用，还是生意上周转呀？"
     };
     private static final String[] PURPOSE_REPHRASE = {
-            "用途我再确认一句，个人用还是公司用，我好给您匹配产品。"
+            "用途我再确认一句，个人用还是公司用，好给您对产品。"
     };
     private static final String[] BOTH_FIRST = {
-            "嗯好的，那您大概想用多少万呢？",
-            "行，方便说下期望额度吗，大概多少万？"
+            "行，那您大概想用多少呢？",
+            "嗯，大概多少万，您说个数就行。"
     };
     private static final String[] BOTH_REPHRASE = {
-            "分开问下，多少万、什么时候用？"
+            "我分开问下，大概多少万、啥时候用？"
     };
     private static final String[] GOODBYE = {
             "好的，那先不打扰您了，祝您生活愉快，再见。",
@@ -191,7 +191,7 @@ public final class DialogSlotHelper {
             return humanAck(slots) + pickMissingQuestion(slots, asks, true);
         }
         if (slots.hasAmount && (asksBoth(lastAi) || asksAmount(lastAi)) && !asksTime(lastAi)) {
-            return "好的，记下了，大概 " + slots.amountLabel + "，"
+            return "行，大概 " + slots.amountLabel + "，"
                     + pickVariant(TIME_FIRST, TIME_REPHRASE, asks.timeAskCount, false);
         }
         if (isFillerOnly(t)) {
@@ -208,7 +208,7 @@ public final class DialogSlotHelper {
             return pickVariant(BOTH_FIRST, BOTH_REPHRASE, asks.bothAskCount, false);
         }
         if (slots.hasAmount && slots.hasTime && !slots.hasPurpose) {
-            return "好的，" + slots.amountLabel + "、" + slots.timeLabel + "要用，"
+            return "嗯，" + slots.amountLabel + "、" + slots.timeLabel + "用，"
                     + pickVariant(PURPOSE_FIRST, PURPOSE_REPHRASE, asks.purposeAskCount, unclear);
         }
         if (slots.hasAmount && slots.hasTime && slots.hasPurpose) {
@@ -216,20 +216,20 @@ public final class DialogSlotHelper {
         }
         if (slots.hasTime && !slots.hasAmount) {
             if (unclear && asks.amountAskCount > 0 && !isNumericAmountUtterance(t)) {
-                return "嗯嗯，" + pickVariant(AMOUNT_REPHRASE, AMOUNT_REPHRASE, asks.amountAskCount, true);
+                return "嗯，" + pickVariant(AMOUNT_REPHRASE, AMOUNT_REPHRASE, asks.amountAskCount, true);
             }
-            return "好的，" + slots.timeLabel + "要用的话，"
+            return "行，" + slots.timeLabel + "用的话，"
                     + pickVariant(AMOUNT_FIRST, AMOUNT_REPHRASE, asks.amountAskCount, false);
         }
         if (slots.hasAmount && slots.hasTime && !slots.hasPurpose) {
-            return "好的，记下了，大概 " + slots.amountLabel + "、" + slots.timeLabel + "要用，"
+            return "行，大概 " + slots.amountLabel + "、" + slots.timeLabel + "用，"
                     + pickVariant(PURPOSE_FIRST, PURPOSE_REPHRASE, asks.purposeAskCount, unclear);
         }
         if (slots.hasAmount && !slots.hasTime) {
             if (unclear && asks.timeAskCount > 0) {
                 return pickVariant(TIME_REPHRASE, TIME_REPHRASE, asks.timeAskCount, true);
             }
-            return "明白，大概 " + slots.amountLabel + "，"
+            return "嗯，大概 " + slots.amountLabel + "，"
                     + pickVariant(TIME_FIRST, TIME_REPHRASE, asks.timeAskCount, false);
         }
         if (slots.needConfirmed && !slots.hasAmount && !slots.hasTime) {
@@ -509,9 +509,15 @@ public final class DialogSlotHelper {
         if (!StringUtils.hasText(s)) {
             return s;
         }
-        return s.replace("您需要多少资金，计划何时使用", "您大概需要多少万、什么时候用呢")
-                .replace("您需要多少资金", "您大概需要多少万")
-                .replace("计划何时使用", "打算什么时候用");
+        return s.replace("您需要多少资金，计划何时使用", "大概多少万、啥时候用呢")
+                .replace("您需要多少资金", "大概想用多少")
+                .replace("计划何时使用", "啥时候用")
+                .replace("请问您大概需要多少资金呢", "那您大概想用多少呢")
+                .replace("有几个问题需要了解一下", "先跟您对两句")
+                .replace("期望额度", "大概想贷多少")
+                .replace("方便说下", "您说下")
+                .replace("记下了，", "")
+                .replace("我都记下了，", "");
     }
 
     public static boolean isAffirmativeNeed(String t) {

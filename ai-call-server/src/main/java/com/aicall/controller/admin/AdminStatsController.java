@@ -144,6 +144,8 @@ public class AdminStatsController {
             @RequestParam(required = false) Integer tenantId,
             @RequestParam(required = false) Integer callStatus,
             @RequestParam(required = false) String phone,
+            @RequestParam(required = false) String hangupType,
+            @RequestParam(required = false) String exitReason,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime startTime,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime endTime) {
         LambdaQueryWrapper<CallRecord> q = new LambdaQueryWrapper<>();
@@ -155,6 +157,12 @@ public class AdminStatsController {
         }
         if (StringUtils.hasText(phone)) {
             q.like(CallRecord::getCustomerPhone, phone);
+        }
+        if (StringUtils.hasText(hangupType)) {
+            q.eq(CallRecord::getHangupType, hangupType);
+        }
+        if (StringUtils.hasText(exitReason)) {
+            q.eq(CallRecord::getExitReason, exitReason);
         }
         if (startTime != null) {
             q.ge(CallRecord::getCallTime, startTime);

@@ -8,4 +8,5 @@ import lombok.EqualsAndHashCode;
 @EqualsAndHashCode(callSuper = true)
 public class CallRecordVO extends CallRecord {
     private String customerName;
+    private String agentName;
 }

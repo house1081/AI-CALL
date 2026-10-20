@@ -47,7 +47,7 @@ public class DashScopeVoiceTtsService {
     private final VoiceRuntimeSettingsService voiceRuntimeSettingsService;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
+            .connectTimeout(Duration.ofSeconds(5))
             .build();
 
     /** 允许有限并发合成，避免全进程串行拖慢流式首句+尾巴 */
@@ -187,6 +187,11 @@ public class DashScopeVoiceTtsService {
                 || msg.contains("broken pipe") || msg.contains("goaway");
     }
 
+    private Duration ttsRequestTimeout() {
+        int sec = Math.max(3, Math.min(20, aiVoiceProperties.getTtsHttpTimeoutSec()));
+        return Duration.ofSeconds(sec);
+    }
+
     private static void sleepQuiet(long ms) {
         try {
             Thread.sleep(ms);
@@ -232,7 +237,7 @@ public class DashScopeVoiceTtsService {
         Map<String, Object> body = buildTtsRequestBody(text, false, voiceIdOverride, useInstruction);
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(TTS_URL))
-                .timeout(Duration.ofSeconds(28))
+                .timeout(ttsRequestTimeout())
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
@@ -267,7 +272,7 @@ public class DashScopeVoiceTtsService {
     private byte[] downloadAudioUrl(String url) throws Exception {
         HttpRequest get = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(25))
+                .timeout(ttsRequestTimeout())
                 .GET()
                 .build();
         HttpResponse<byte[]> resp = httpClient.send(get, HttpResponse.BodyHandlers.ofByteArray());
@@ -287,7 +292,7 @@ public class DashScopeVoiceTtsService {
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(TTS_URL))
-                .timeout(Duration.ofSeconds(28))
+                .timeout(ttsRequestTimeout())
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .header("X-DashScope-SSE", "enable")

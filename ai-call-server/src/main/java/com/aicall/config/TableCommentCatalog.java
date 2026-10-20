@@ -23,6 +23,7 @@ public final class TableCommentCatalog {
         m.put("customer", "外呼客户名单");
         m.put("call_task", "外呼任务");
         m.put("call_record", "通话记录与计费");
+        m.put("tenant_agent", "租户坐席分机/手机");
         m.put("recharge_order", "商户充值订单");
         m.put("balance_log", "商户余额变动明细");
         m.put("price_change_log", "售价修改审计日志");
@@ -183,10 +184,28 @@ public final class TableCommentCatalog {
                 "level", "意向等级 A/B/C/D",
                 "call_status", "通话状态：1接通 2无人 3空号 4拒接 5失败",
                 "hangup_type", "挂断类型：正常结束/转人工/强制挂断等",
+                "exit_reason", "技术退出原因：customer_hangup_late/ai_hangup等",
+                "dialog_rounds", "对话轮次",
+                "ai_hangup", "是否AI主动挂机：1是0否",
                 "call_time", "通话开始时间",
                 "task_id", "外呼任务ID",
                 "prompt_id", "通话快照-话术模板ID",
-                "kb_id", "通话快照-知识库ID"));
+                "kb_id", "通话快照-知识库ID",
+                "agent_id", "关联坐席ID（点呼/转人工）",
+                "call_mode", "通话模式：ai_task/click_call/human_transfer"));
+        cols(all, "tenant_agent", map(
+                "id", "主键",
+                "tenant_id", "商户ID",
+                "name", "坐席名称",
+                "dest_type", "目标类型：ext分机/mobile手机",
+                "fs_dest", "FS拨号目标或手机号",
+                "mobile", "手机号（展示用）",
+                "line_id", "手机坐席外呼线路ID",
+                "status", "状态：0停用 1启用",
+                "presence", "在岗状态：offline/available/busy",
+                "sort_order", "排序（越小越优先）",
+                "create_time", "创建时间",
+                "update_time", "更新时间"));
         cols(all, "recharge_order", map(
                 "id", "主键",
                 "order_no", "充值订单号",

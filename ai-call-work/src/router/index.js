@@ -9,6 +9,7 @@ const routes = [
     children: [
       { path: 'home', component: () => import('../views/Home.vue') },
       { path: 'customer', component: () => import('../views/Customer.vue') },
+      { path: 'agent', component: () => import('../views/Agent.vue') },
       { path: 'task', component: () => import('../views/Task.vue') },
       { path: 'call-record', component: () => import('../views/CallRecord.vue') },
       { path: 'intent', component: () => import('../views/Intent.vue') },

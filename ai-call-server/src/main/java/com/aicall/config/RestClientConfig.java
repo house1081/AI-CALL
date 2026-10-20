@@ -21,8 +21,8 @@ public class RestClientConfig {
     /** ASR 专用：较短超时 + 快速重试，避免 Connection reset 挂 20s+ */
     @Bean
     public RestTemplate asrRestTemplate(AiVoiceProperties voiceProps, RestTemplateBuilder builder) {
-        int connectMs = Math.max(3000, voiceProps.getAsrConnectTimeoutMs());
-        int readMs = Math.max(8000, voiceProps.getAsrReadTimeoutMs());
+        int connectMs = Math.max(1500, voiceProps.getAsrConnectTimeoutMs());
+        int readMs = Math.max(2000, Math.min(8000, voiceProps.getAsrReadTimeoutMs()));
         return builder
                 .setConnectTimeout(Duration.ofMillis(connectMs))
                 .setReadTimeout(Duration.ofMillis(readMs))

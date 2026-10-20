@@ -5,6 +5,7 @@
       <el-menu :default-active="$route.path" router background-color="#1565c0" text-color="#fff">
         <el-menu-item index="/home">首页</el-menu-item>
         <el-menu-item index="/customer">客户管理</el-menu-item>
+        <el-menu-item index="/agent">坐席管理</el-menu-item>
         <el-menu-item index="/task">外呼任务</el-menu-item>
         <el-menu-item index="/call-record">通话记录</el-menu-item>
         <el-menu-item index="/intent">意向客户</el-menu-item>

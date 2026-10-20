@@ -105,7 +105,7 @@ public final class LlmStreamingSentenceBuffer {
         }
     }
 
-    /** 首句须有实质内容，禁止单独「行/好/嗯」抢先开播 */
+    /** 首句须有实质内容；单独「行/好/嗯」不开播，但「行，那您…」允许 */
     static boolean isSpeakableFirstChunk(String sentence) {
         if (!StringUtils.hasText(sentence) || sentence.length() < 6) {
             return false;
@@ -114,6 +114,7 @@ public final class LlmStreamingSentenceBuffer {
         if (n.length() < 4) {
             return false;
         }
+        // 仅拦截纯弱承接；带后续内容的口语开头放行
         return !(n.equals("行") || n.equals("好") || n.equals("好的") || n.equals("嗯") || n.equals("嗯嗯")
                 || n.equals("哦") || n.equals("明白") || n.equals("了解") || n.equals("记下了")
                 || n.equals("好嘞") || n.equals("可以") || n.equals("收到") || n.equalsIgnoreCase("ok"));

@@ -122,6 +122,10 @@ public class FreeSwitchEslService {
                 || isPositiveEpoch(uuidGetVar(uuid, "answered_time"))) {
             return true;
         }
+        String answerState = uuidGetVar(uuid, "answer_state");
+        if (isMeaningfulVar(answerState) && "answered".equalsIgnoreCase(answerState.trim())) {
+            return true;
+        }
         for (String var : List.of("callstate", "channel_call_state", "state", "Channel-Call-State")) {
             if (isActiveCallState(uuidGetVar(uuid, var))) {
                 return true;

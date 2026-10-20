@@ -56,6 +56,11 @@ public class OutboundVoiceReadinessService {
     }
 
     private String pendingParts() {
+        return pendingPartsPublic();
+    }
+
+    /** 供健康检查暴露未就绪组件 */
+    public String pendingPartsPublic() {
         StringBuilder sb = new StringBuilder();
         if (!dialogRagRetrievalService.isIndexReady()) {
             sb.append("RAG ");

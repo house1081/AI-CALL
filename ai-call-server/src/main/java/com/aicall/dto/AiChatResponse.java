@@ -21,4 +21,10 @@ public class AiChatResponse {
     private Boolean playbackWaitHandled;
     /** 本轮应答来自问答音频缓存（未调 LLM） */
     private Boolean fromReplyAudioCache;
+    /** 首句真正开播距本轮开始毫秒（TTFA）；未开播为 null */
+    private Long ttfaMs;
+    /** 本轮 RAG 检索耗时毫秒（含超时跳过） */
+    private Long ragMs;
+    /** 决策路径：llm / keyword / slot-mainflow / reply-cache / clarify / identity / prerecord 等 */
+    private String decidePath;
 }

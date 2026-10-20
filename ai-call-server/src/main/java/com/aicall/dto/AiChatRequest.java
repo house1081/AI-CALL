@@ -19,4 +19,9 @@ public class AiChatRequest {
     private String fsUuid;
     /** 对话训练会话 ID（无 callRecordId 时用于强制挂断计数） */
     private String trainSessionId;
+    /**
+     * 开口世代号：与 OutboundDialogRegistry 绑定；
+     * must-speak 超时 bump 后，迟到的 TTS 播报会被跳过。
+     */
+    private Long speakGeneration;
 }

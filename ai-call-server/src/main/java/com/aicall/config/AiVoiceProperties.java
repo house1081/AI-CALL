@@ -93,8 +93,8 @@ public class AiVoiceProperties {
     private int fsSocketPort = 8888;
 
     private String asrHttpUrl = "";
-    private int asrConnectTimeoutMs = 5000;
-    private int asrReadTimeoutMs = 30000;
+    private int asrConnectTimeoutMs = 3000;
+    private int asrReadTimeoutMs = 4000;
     /** 中文 zh-CN */
     private String asrLanguage = "zh-CN";
     /** 电话场景：phone_call（映射 DashScope paraformer-8k / HTTP model 参数） */
@@ -177,6 +177,17 @@ public class AiVoiceProperties {
      * 0=关闭 TTFT 门控，仅受 dialog-llm-timeout-sec 约束。
      */
     private int dialogLlmTtftTimeoutSec = 4;
+    /**
+     * 商业级：首句开播超过该毫秒记为 TTFA 事故并打 WARN（默认 3000）。
+     */
+    private long commercialTtfaWarnMs = 3000;
+    /**
+     * 整轮「必须开口」预算（毫秒）：从开始回应当轮起，超时仍未播完/返回则强制本地兜底话术。
+     * 覆盖 ASR 后 LLM+TTS 整段；建议 3000~5000。
+     */
+    private long dialogMustSpeakMs = 5000;
+    /** CosyVoice HTTP 连接/读超时（秒），网络不稳时尽快失败走本地短语/SAPI */
+    private int ttsHttpTimeoutSec = 5;
     /** 外呼对话 LLM 线程池大小 */
     private int dialogLlmPoolSize = 6;
     /** 分段模式：客户长时间无有效 ASR 时主动 gentle 询问 */

@@ -596,7 +596,7 @@ public final class ForcedHangupRules {
     }
 
     public static String identityFallbackReply() {
-        return "我是建行服务商，帮客户走绿色通道提额降息，您有需求吗？";
+        return "我这边是建行合作的服务商，帮客户提额降息的，您最近有资金需求吗？";
     }
 
     public static String serviceFallbackReply() {
@@ -712,6 +712,14 @@ public final class ForcedHangupRules {
         return "非常抱歉，系统暂时无法为您解答，请稍后再试";
     }
 
+    /**
+     * 网络抖动/整轮开口超时：本地秒级兜底，避免空等。
+     * 优先短、口语、可接主线。
+     */
+    public static String mustSpeakFallbackReply() {
+        return "信号有点慢，您先说，我听着呢。";
+    }
+
     /** 知识库无匹配时的固定兜底（禁止 AI 自由编造） */
     public static String knowledgeNoMatchFallbackReply() {
         return "这个问题我暂时无法准确回答，我帮您记录一下，稍后会有同事跟您联系。";
@@ -770,9 +778,9 @@ public final class ForcedHangupRules {
             return "好的，这个额度我们要看下征信和收入，您主要是个人用还是公司用呢？";
         }
         if (isAffirmativeShort(t)) {
-            return "嗯好的，那您这边大概想用多少万呢？";
+            return "行，那您大概想用多少呢？";
         }
-        return "好的，我再帮您补一项，您说下期望额度或者还款方式就行。";
+        return "行，我再跟您对一下，大概想贷多少、怎么还就行。";
     }
 
     private static boolean isAffirmativeShort(String t) {
@@ -795,6 +803,60 @@ public final class ForcedHangupRules {
 
     public static String clarificationFallbackReply() {
         return "不好意思我没听清楚，麻烦您再说一遍好吗？";
+    }
+
+    /**
+     * 上一轮在问额度，客户追问「什么多少万/啥意思」——应解释额度问法，勿复读或扯到批额。
+     */
+    public static boolean isConfusedAboutAmountAsk(String userText, String lastAssistantText) {
+        if (userText == null || userText.isBlank() || !assistantAskedLoanAmount(lastAssistantText)) {
+            return false;
+        }
+        String n = normalizeShortUtterance(userText);
+        if (n.isEmpty()) {
+            return false;
+        }
+        return n.contains("什么多少万") || n.contains("多少万什么") || n.contains("啥多少万")
+                || n.contains("什么多少钱") || n.contains("多少钱什么")
+                || n.equals("什么") || n.equals("啥") || n.equals("什么啊")
+                || n.contains("啥意思") || n.contains("什么意思")
+                || n.equals("多少万")
+                || (n.contains("什么") && (n.contains("万") || n.contains("钱")));
+    }
+
+    private static boolean assistantAskedLoanAmount(String lastAssistantText) {
+        if (lastAssistantText == null || lastAssistantText.isBlank()) {
+            return false;
+        }
+        String ai = lastAssistantText.trim();
+        return ai.contains("多少万") || ai.contains("多少资金") || ai.contains("期望额度")
+                || ai.contains("贷多少") || ai.contains("用多少") || ai.contains("想用多少")
+                || ai.contains("申请多少");
+    }
+
+    /** 客户明确在问利息/费用（非报额度） */
+    public static boolean isInterestOrFeeQuestion(String userText) {
+        if (userText == null || userText.isBlank()) {
+            return false;
+        }
+        String t = userText.trim();
+        if (t.contains("利息") || t.contains("利率") || t.contains("月息") || t.contains("年化")
+                || t.contains("手续费") || t.contains("居间费") || t.contains("怎么收")
+                || t.contains("收费") || t.contains("费用")) {
+            return true;
+        }
+        String n = normalizeShortUtterance(t);
+        // 「多少钱」单独出现且不含「万」：口语多半问利息/成本
+        return (n.equals("多少钱") || n.equals("多少钱啊") || n.equals("多少钱呢")
+                || n.contains("多少钱")) && !n.contains("万");
+    }
+
+    public static String amountAskClarifyReply() {
+        return "就是大概想贷多少，比方说三五十万那种，您方便说个数吗？";
+    }
+
+    public static String interestQuickReply() {
+        return "利息大概两个多点，一万块一个月二十来块。您这边想贷多少？";
     }
 
     /** 客户表示 AI/ASR 听错或自己说错，应重问当前步而非推进或挂机 */

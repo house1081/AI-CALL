@@ -12,8 +12,11 @@
       <el-table-column prop="lastCallTime" label="最后通话" width="170" />
       <el-table-column prop="customerNeed" label="需求" show-overflow-tooltip />
       <el-table-column prop="budget" label="预算" width="100" />
-      <el-table-column label="操作" width="80">
-        <template #default="{row}"><el-button link @click="showDetail(row)">详情</el-button></template>
+      <el-table-column label="操作" width="140">
+        <template #default="{ row }">
+          <el-button link @click="showDetail(row)">详情</el-button>
+          <el-button link type="success" @click="clickCallRef?.open(row)">点呼</el-button>
+        </template>
       </el-table-column>
     </el-table>
     <el-pagination v-model:current-page="page" :page-size="10" :total="total" @current-change="load" style="margin-top:16px" />
@@ -31,6 +34,7 @@
         <el-table-column prop="level" label="意向" width="60" />
       </el-table>
     </el-dialog>
+    <ClickCallDialog ref="clickCallRef" />
   </div>
 </template>
 
@@ -38,6 +42,7 @@
 import { ref, onMounted } from 'vue'
 import request from '../api/request'
 import { downloadFile } from '../utils/download'
+import ClickCallDialog from '../components/ClickCallDialog.vue'
 
 const list = ref([])
 const page = ref(1)
@@ -46,6 +51,7 @@ const level = ref('')
 const detailVisible = ref(false)
 const current = ref(null)
 const records = ref([])
+const clickCallRef = ref(null)
 
 const load = async () => {
   const data = await request.get('/tenant/portal/intent/list', {

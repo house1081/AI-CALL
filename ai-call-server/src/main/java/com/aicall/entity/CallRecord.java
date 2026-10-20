@@ -36,8 +36,18 @@ public class CallRecord {
     private Integer callStatus;
     /** 正常结束 / 强制挂断-* */
     private String hangupType;
+    /** 技术退出原因：customer_hangup_late / ai_hangup / max_rounds 等 */
+    private String exitReason;
+    /** 对话轮次 */
+    private Integer dialogRounds;
+    /** 是否 AI 主动挂机 */
+    private Integer aiHangup;
     private LocalDateTime callTime;
     private Integer taskId;
     private Integer promptId;
     private Integer kbId;
+    /** 坐席 ID（点呼 / 转人工） */
+    private Integer agentId;
+    /** ai_task | click_call | human_transfer */
+    private String callMode;
 }

@@ -27,9 +27,15 @@
       <el-table-column prop="groupName" label="分组" />
       <el-table-column prop="level" label="意向" width="70" />
       <el-table-column prop="isBlack" label="黑名单" width="80"><template #default="{row}">{{ row.isBlack?'是':'否' }}</template></el-table-column>
-      <el-table-column label="操作" width="90" fixed="right">
+      <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+          <el-button
+            link
+            type="success"
+            :disabled="row.isBlack === 1"
+            @click="clickCallRef?.open(row)"
+          >点呼</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -64,6 +70,7 @@
         </el-table-column>
       </el-table>
     </el-dialog>
+    <ClickCallDialog ref="clickCallRef" />
   </div>
 </template>
 
@@ -72,6 +79,7 @@ import { ref, onMounted } from 'vue'
 import request from '../api/request'
 import { downloadFile } from '../utils/download'
 import { ElMessage } from 'element-plus'
+import ClickCallDialog from '../components/ClickCallDialog.vue'
 
 const list = ref([])
 const groups = ref([])
@@ -83,6 +91,7 @@ const moveGroupId = ref(null)
 const showAdd = ref(false)
 const showImport = ref(false)
 const showGroup = ref(false)
+const clickCallRef = ref(null)
 const newGroupName = ref('')
 const form = ref({ groupId: 1 })
 const importText = ref('')

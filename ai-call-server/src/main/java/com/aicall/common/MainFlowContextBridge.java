@@ -84,75 +84,75 @@ public final class MainFlowContextBridge {
         if (AsrTextNormalizer.isNumericAmountUtterance(userText)
                 || DialogSlotHelper.isStatingLoanAmount(userText)
                 || looksLikeAmount(u)) {
-            return "好的" + compactAmount(userText) + "，";
+            return "行，" + compactAmount(userText) + "，";
         }
         if (ai.contains("有车")) {
             if (isNeg(u)) {
-                return "嗯没有车，";
+                return "嗯，没车，";
             }
             if (isPos(u) || u.contains("有")) {
-                return "好的有车，";
+                return "行，有车，";
             }
         }
         if (ai.contains("有房") || ai.contains("房子")) {
             if (isNeg(u)) {
-                return "嗯没有房，";
+                return "嗯，没房，";
             }
             if (isPos(u) || u.contains("有")) {
-                return "好的有房，";
+                return "行，有房，";
             }
         }
         if (ai.contains("社保") || ai.contains("公积金")) {
             if (isNeg(u) || u.contains("都没有") || u.contains("没交")) {
-                return "嗯了解，";
+                return "嗯，了解，";
             }
             if (isPos(u) || u.contains("有") || u.contains("在交") || u.contains("正常")) {
-                return "好的，";
+                return "行，";
             }
             if (containsDuration(u)) {
-                return "好的，";
+                return "行，";
             }
         }
         if (ai.contains("上班") || ai.contains("做生意") || ai.contains("职业")) {
             if (u.contains("上班") || u.contains("打工") || u.contains("工")) {
-                return "好的上班，";
+                return "上班是吧，";
             }
             if (u.contains("生意") || u.contains("个体") || u.contains("自己干")) {
-                return "好的做生意，";
+                return "做生意是吧，";
             }
         }
         if (ai.contains("工资") || ai.contains("收入") || ai.contains("流水") || ai.contains("开票") || ai.contains("纳税")) {
             if (isNeg(u)) {
-                return "嗯好的，";
+                return "嗯，";
             }
             if (looksLikeAmount(u) || containsDuration(u)) {
-                return "好的，";
+                return "行，";
             }
         }
         if (ai.contains("征信") || ai.contains("逾期")) {
             if (isNeg(u) || u.contains("没有") || u.contains("正常") || u.contains("良好")) {
-                return "好的，";
+                return "行，";
             }
         }
         if (ai.contains("全款") || ai.contains("按揭")) {
             if (u.contains("全款")) {
-                return "好的全款，";
+                return "全款是吧，";
             }
             if (u.contains("按揭") || u.contains("贷款")) {
-                return "好的按揭，";
+                return "按揭是吧，";
             }
         }
         if (isNeg(u)) {
-            return "嗯好的，";
+            return "嗯，";
         }
         if (isPos(u) || ForcedHangupRules.isCooperativeAnswer(userText)
                 || DialogScriptKeywordMatcher.looksLikeAccept(userText)) {
-            return "好的，";
+            return "行，";
         }
         if (u.length() <= 6) {
             return "嗯，";
         }
-        return "明白，";
+        return "好，";
     }
 
     private static boolean scriptAlreadyBridged(String script) {

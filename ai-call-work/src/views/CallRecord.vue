@@ -13,6 +13,10 @@
       <el-table-column prop="callTime" label="通话时间" width="170" />
       <el-table-column prop="customerPhone" label="手机" />
       <el-table-column prop="customerName" label="姓名" width="90" />
+      <el-table-column label="模式" width="100">
+        <template #default="{ row }">{{ modeMap[row.callMode] || row.callMode || 'AI任务' }}</template>
+      </el-table-column>
+      <el-table-column prop="agentName" label="坐席" width="90" />
       <el-table-column prop="callDuration" label="时长(秒)" width="90" />
       <el-table-column label="扣费(元)" width="90">
         <template #default="{row}">{{ formatDeduct(row) }}</template>
@@ -81,6 +85,7 @@ import request from '../api/request'
 import { downloadFile } from '../utils/download'
 
 const statusMap = { 1: '接通', 2: '无人接听', 3: '空号', 4: '关机', 5: '拒接', 6: '拨号失败' }
+const modeMap = { ai_task: 'AI任务', click_call: '点呼', human_transfer: '转人工' }
 const list = ref([])
 const page = ref(1)
 const total = ref(0)

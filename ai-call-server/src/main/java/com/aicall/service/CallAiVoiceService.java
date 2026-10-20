@@ -51,6 +51,9 @@ public class CallAiVoiceService {
         return t;
     });
 
+    /** 与 OutboundDialogRegistry 开口世代绑定，异步 TTS 线程需继承 */
+    private static final ThreadLocal<Long> ACTIVE_SPEAK_GEN = new ThreadLocal<>();
+
     private static final Executor REPLY_CACHE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "reply-cache-store");
         t.setDaemon(true);
@@ -99,6 +102,10 @@ public class CallAiVoiceService {
             blocked.setModel("smart-prerecord-blocked");
             return blocked;
         }
+        Long speakGen = req.getSpeakGeneration();
+        if (speakGen != null) {
+            ACTIVE_SPEAK_GEN.set(speakGen);
+        }
         try {
             // TTS/播报在超时外执行；仅 chat 受 dialog-llm-timeout-sec 约束（见 voiceTurnDialog）
             return voiceTurnInternal(req);
@@ -110,6 +117,8 @@ public class CallAiVoiceService {
         } catch (Exception e) {
             log.warn("[LLM] 大模型失败 uuid={}: {}", req.getFsUuid(), e.getMessage());
             return voiceTurnWithLiveFallback(req);
+        } finally {
+            ACTIVE_SPEAK_GEN.remove();
         }
     }
 
@@ -177,11 +186,19 @@ public class CallAiVoiceService {
         long turnStart = System.currentTimeMillis();
         Optional<AiChatResponse> cachedReply = tryReplyAudioCache(req, turnStart);
         if (cachedReply.isPresent()) {
-            return cachedReply.get();
+            AiChatResponse cached = cachedReply.get();
+            if (cached.getDecidePath() == null) {
+                cached.setDecidePath("reply-cache");
+            }
+            if (cached.getTtfaMs() == null) {
+                cached.setTtfaMs(System.currentTimeMillis() - turnStart);
+            }
+            return cached;
         }
         AtomicBoolean streamTtsStarted = new AtomicBoolean(false);
         AtomicReference<String> streamTtsPrefix = new AtomicReference<>("");
         AtomicReference<CompletableFuture<Void>> streamFirstPlayFuture = new AtomicReference<>();
+        java.util.concurrent.atomic.AtomicLong ttfaMsHolder = new java.util.concurrent.atomic.AtomicLong(-1L);
         final java.util.function.Predicate<String> onFirstChunk;
         if (aiVoiceProperties.isDialogLlmStream() && aiVoiceProperties.isDialogLlmStreamTts()
                 && req.getCallRecordId() != null && shouldPlayOnChannel(req.getFsUuid())) {
@@ -198,10 +215,23 @@ public class CallAiVoiceService {
                     return false;
                 }
                 streamTtsPrefix.set(chunk);
+                long ttfa = System.currentTimeMillis() - turnStart;
+                ttfaMsHolder.compareAndSet(-1L, ttfa);
                 log.info("[对话TTS] 流式首句开播 uuid={} 距回合开始{}ms len={}",
-                        req.getFsUuid(), System.currentTimeMillis() - turnStart, chunk.length());
+                        req.getFsUuid(), ttfa, chunk.length());
+                outboundDialogRegistry.markSpeakOpened(req.getFsUuid());
                 String fsUuid = req.getFsUuid();
-                streamFirstPlayFuture.set(CompletableFuture.runAsync(() -> playText(fsUuid, chunk), STREAM_TTS_EXECUTOR));
+                Long speakGen = ACTIVE_SPEAK_GEN.get();
+                streamFirstPlayFuture.set(CompletableFuture.runAsync(() -> {
+                    if (speakGen != null) {
+                        ACTIVE_SPEAK_GEN.set(speakGen);
+                    }
+                    try {
+                        playText(fsUuid, chunk);
+                    } finally {
+                        ACTIVE_SPEAK_GEN.remove();
+                    }
+                }, STREAM_TTS_EXECUTOR));
                 return true;
             };
         } else {
@@ -227,6 +257,10 @@ public class CallAiVoiceService {
                 partial.setModel("llm-timeout-stream-prefix");
                 partial.setStreamedTtsPlayed(true);
                 partial.setPlaybackWaitHandled(true);
+                partial.setDecidePath("llm-timeout-prefix");
+                if (ttfaMsHolder.get() >= 0) {
+                    partial.setTtfaMs(ttfaMsHolder.get());
+                }
                 DialogTranscriptLog.aiReply(req.getCallRecordId(), req.getFsUuid(),
                         partial.getReply(), partial.getModel(), false);
                 return partial;
@@ -283,6 +317,9 @@ public class CallAiVoiceService {
                     playStreamTtsTail(req.getFsUuid(), toPlay, streamTtsPrefix.get(), streamFirstPlayFuture.get());
                     r.setPlaybackWaitHandled(true);
                 } else {
+                    if (ttfaMsHolder.get() < 0 && StringUtils.hasText(toPlay)) {
+                        ttfaMsHolder.compareAndSet(-1L, System.currentTimeMillis() - turnStart);
+                    }
                     playText(req.getFsUuid(), toPlay);
                 }
                 storeReplyAudioCache(req, toPlay, r);
@@ -291,6 +328,12 @@ public class CallAiVoiceService {
             } else {
                 log.warn("通道已不存在或已取消，跳过播报 uuid={}", req.getFsUuid());
             }
+        }
+        if (ttfaMsHolder.get() >= 0) {
+            r.setTtfaMs(ttfaMsHolder.get());
+        } else if (r.getTtfaMs() == null && r.getLatencyMs() != null) {
+            // 快路径未走流式：决策完成约等于可开播
+            r.setTtfaMs(r.getLatencyMs());
         }
         return r;
     }
@@ -405,10 +448,22 @@ public class CallAiVoiceService {
     }
 
     private boolean shouldPlayOnChannel(String fsUuid) {
+        return shouldPlayOnChannel(fsUuid, ACTIVE_SPEAK_GEN.get());
+    }
+
+    private boolean shouldPlayOnChannel(String fsUuid, Long speakGeneration) {
         if (!freeSwitchProperties.isEnabled() || !eslService.uuidExists(fsUuid)) {
             return false;
         }
-        return outboundDialogRegistry.shouldContinue(fsUuid);
+        if (!outboundDialogRegistry.shouldContinue(fsUuid)) {
+            return false;
+        }
+        if (speakGeneration != null
+                && !outboundDialogRegistry.isSpeakGenerationCurrent(fsUuid, speakGeneration)) {
+            log.info("[TTS] 跳过过期播报 uuid={} gen={}", fsUuid, speakGeneration);
+            return false;
+        }
+        return true;
     }
 
     private String dedupeAgainstLastAssistant(String reply, AiChatRequest req) {
@@ -597,6 +652,7 @@ public class CallAiVoiceService {
             log.warn("播报跳过：通道不存在或对话已取消 uuid={}", fsUuid);
             return;
         }
+        outboundDialogRegistry.markSpeakOpened(fsUuid);
         String safe = SpeakTextLimiter.limit(text, aiVoiceProperties.getMaxSpeakChars());
         safe = OralScriptNormalizer.normalize(safe);
         boolean ok = aiVoiceProperties.isTtsSentenceSequentialEnabled()

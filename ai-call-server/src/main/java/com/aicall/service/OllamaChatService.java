@@ -239,7 +239,42 @@ public class OllamaChatService {
                 clarify = "不好意思没听清，" + stripLeadingWeakAck(current);
             }
             log.info("[对话LLM] AI外呼含糊澄清 recordId={} user={}", req.getCallRecordId(), req.getUserText());
-            return buildQuickReply(req, SpeakTextLimiter.limit(clarify, speakBudget()), modelCfg, start, false);
+            AiChatResponse clarifyResp = buildQuickReply(req, SpeakTextLimiter.limit(clarify, speakBudget()),
+                    modelCfg, start, false);
+            clarifyResp.setDecidePath("clarify");
+            return clarifyResp;
+        }
+
+        // 额度问法没听懂：「什么多少万？」→ 举例解释，禁止复读/扯批额
+        if (ForcedHangupRules.isConfusedAboutAmountAsk(req.getUserText(), lastAi)) {
+            String body = SpeakTextLimiter.limit(ForcedHangupRules.amountAskClarifyReply(), speakBudget());
+            log.info("[对话LLM] AI外呼额度问法澄清 recordId={} user={}", req.getCallRecordId(), req.getUserText());
+            AiChatResponse fast = buildQuickReply(req, body, modelCfg, start, true);
+            fast.setDecidePath("amount-clarify");
+            return fast;
+        }
+
+        // 「多少钱/利息」→ 利率快答，避免 LLM 理解成「能批多少额度」
+        if (ForcedHangupRules.isInterestOrFeeQuestion(req.getUserText())
+                && !DialogSlotHelper.isStatingLoanAmount(req.getUserText())) {
+            String ans = null;
+            if (dialogRagProperties.isEnabled()) {
+                DialogRagRetrieveResult keywordHit = dialogRagRetrievalService.tryKeywordDirectAnswer(
+                        req.getUserText(), kbId);
+                if (keywordHit.isDirectAnswer() && StringUtils.hasText(keywordHit.getDirectAnswerText())) {
+                    ans = OralScriptNormalizer.normalize(keywordHit.getDirectAnswerText().trim());
+                }
+            }
+            if (!StringUtils.hasText(ans)) {
+                ans = ForcedHangupRules.interestQuickReply();
+            } else if (!ans.contains("？") && !ans.contains("多少万")) {
+                ans = SpeakTextLimiter.limit(ans + " 您大概想贷多少万呢？", speakBudget());
+            }
+            ans = SpeakTextLimiter.limit(ans, speakBudget());
+            log.info("[对话LLM] AI外呼利率/费用快答 recordId={} user={}", req.getCallRecordId(), req.getUserText());
+            AiChatResponse fast = buildQuickReply(req, ans, modelCfg, start, true);
+            fast.setDecidePath("interest-fee");
+            return fast;
         }
 
         // 身份/听不清/嫌慢：极短快答（低延迟），不抢主线推进
@@ -256,7 +291,15 @@ public class OllamaChatService {
                         && !ForcedHangupRules.isLatencyComplaint(req.getUserText())) {
                     body = SpeakTextLimiter.limit(quick + " " + stripLeadingWeakAck(resume), speakBudget());
                 }
-                return buildQuickReply(req, body, modelCfg, start, true);
+                AiChatResponse fast = buildQuickReply(req, body, modelCfg, start, true);
+                if (ForcedHangupRules.isLatencyComplaint(req.getUserText())) {
+                    fast.setDecidePath("latency-complaint");
+                } else if (ForcedHangupRules.isHearingIssue(req.getUserText())) {
+                    fast.setDecidePath("hearing");
+                } else {
+                    fast.setDecidePath("identity");
+                }
+                return fast;
             }
         }
 
@@ -275,7 +318,10 @@ public class OllamaChatService {
                 log.info("[对话LLM] AI外呼关键词直出 recordId={} ruleId={} replyLen={}",
                         req.getCallRecordId(), keywordHit.getKeywordRuleId(),
                         ans != null ? ans.length() : 0);
-                return buildQuickReply(req, ans, modelCfg, start, true);
+                AiChatResponse quick = buildQuickReply(req, ans, modelCfg, start, true);
+                quick.setDecidePath("keyword");
+                quick.setRagMs(0L);
+                return quick;
             }
         }
 
@@ -366,7 +412,10 @@ public class OllamaChatService {
                 req.getUserText().length() > 20 ? req.getUserText().substring(0, 20) + "…" : req.getUserText(),
                 body.length(),
                 dialogMainFlowService.currentStep(req.getCallRecordId()));
-        return buildQuickReply(req, body, modelCfg, start, false);
+        AiChatResponse fast = buildQuickReply(req, body, modelCfg, start, false);
+        fast.setDecidePath("slot-mainflow");
+        fast.setRagMs(0L);
+        return fast;
     }
 
     /** 外呼向量检索：硬超时跳过，避免嵌入接口卡死导致客户空等挂机 */
@@ -398,7 +447,7 @@ public class OllamaChatService {
             if (aiOutbound) {
                 system = system + "\n\n【主线引导】若客户在回答上一问，先用半句口语接住，再自然问出意思相同的话："
                         + "「" + mainFlowGuide.trim() + "」。"
-                        + "可以把书面说法改口语，例如「请问需要多少资金」→「那您大概要多少资金」；"
+                        + "可以把书面说法改口语，例如「请问需要多少资金」→「那您大概想用多少」；"
                         + "若客户在提问，先答提问，再酌情接回。禁止无视客户本句硬背原文；"
                         + "听不清就换说法重问，不要编造利率或放款承诺。";
             } else {
@@ -478,11 +527,21 @@ public class OllamaChatService {
                         req.getUserText(), lastAssistantText(req.getHistory()), mainFlowGuide);
                 dialogMainFlowService.commitAdvanceAfterReply(
                         req.getCallRecordId(), req.getUserText(), lastAssistantText(req.getHistory()));
-                return buildQuickReply(req, SpeakTextLimiter.limit(bridged, speakBudget()),
+                AiChatResponse fb = buildQuickReply(req, SpeakTextLimiter.limit(bridged, speakBudget()),
                         modelCfg, start, false);
+                fb.setDecidePath("llm-ttft-fallback");
+                if (rag != null) {
+                    fb.setRagMs(rag.getRetrieveMs());
+                }
+                return fb;
             }
             if (req.getCallRecordId() != null) {
-                return buildQuickReply(req, resolveLiveCallFallbackText(req), modelCfg, start);
+                AiChatResponse fb = buildQuickReply(req, resolveLiveCallFallbackText(req), modelCfg, start);
+                fb.setDecidePath("llm-error-fallback");
+                if (rag != null) {
+                    fb.setRagMs(rag.getRetrieveMs());
+                }
+                return fb;
             }
             if (e instanceof BizException be) {
                 throw be;
@@ -541,12 +600,16 @@ public class OllamaChatService {
         r.setModel(displayModel(modelCfg));
         r.setFromOpening(false);
         r.setLatencyMs(System.currentTimeMillis() - start);
+        r.setDecidePath(aiOutbound ? "llm" : "llm-train");
+        if (rag != null) {
+            r.setRagMs(rag.getRetrieveMs());
+        }
         fillHangupMeta(r, req, pre);
         return r;
     }
 
     private int speakBudget() {
-        return Math.max(aiVoiceProperties.getMaxSpeakChars(), 40);
+        return Math.max(aiVoiceProperties.getMaxSpeakChars(), 52);
     }
 
     private static String stripLeadingWeakAck(String script) {
@@ -666,8 +729,8 @@ public class OllamaChatService {
             return slotReply;
         }
         if (user.contains("多少钱") || user.contains("利率") || user.contains("怎么收")
-                || user.contains("费用")) {
-            return "我们这边信用贷额度一般二十万到一百万，具体看您资质和用途；您大概想贷多少万呢？";
+                || user.contains("费用") || user.contains("利息")) {
+            return ForcedHangupRules.interestQuickReply();
         }
         if (user.contains("还是") && (user.contains("万") || user.matches(".*\\d+.*"))) {
             return "额度区间大概二十万到一百万，要看征信收入；您是想做五十万还是八十万呢？";
@@ -784,7 +847,7 @@ public class OllamaChatService {
         return trimFragmentedReply(polished);
     }
 
-    /** 避免 AI 一次说多个问题或过长碎句；AI 实时优先只保留第一句 */
+    /** 避免一次抛两个问句；允许「半句承接 + 一问」一口气说完 */
     private String trimFragmentedReply(String reply) {
         if (!StringUtils.hasText(reply)) {
             return reply;
@@ -794,7 +857,12 @@ public class OllamaChatService {
         if (aiVoiceProperties.isDialogLlmPrimary()) {
             int firstEnd = firstSentenceEndIndex(t);
             if (firstEnd >= 0 && firstEnd < t.length() - 1) {
-                t = t.substring(0, firstEnd + 1).trim();
+                String rest = t.substring(firstEnd + 1).trim();
+                boolean restHasQuestion = rest.contains("？") || rest.contains("?");
+                // 后半还有第二问，或明显超预算才砍；否则保留承接+一问
+                if (restHasQuestion || t.length() > max + 8) {
+                    t = t.substring(0, firstEnd + 1).trim();
+                }
             }
         }
         int firstQ = indexOfQuestionMark(t);
@@ -1195,12 +1263,13 @@ public class OllamaChatService {
         DialogSlotHelper.Slots slots = DialogSlotHelper.extract(history, currentUser);
         sb.append(DialogSlotHelper.promptSummary(slots));
         int maxChars = Math.max(aiVoiceProperties.getMaxSpeakChars(), 40);
-        sb.append("\n\n【说话风格】你是电话里的真人信贷顾问，必须全程口语聊天，像微信语音说话：")
-                .append("用「您/你、这边、大概、那、行、嗯」这类口头词；禁止书面腔和念稿腔。")
-                .append("反例（禁止）：「请问您大概需要多少资金呢」「有几个问题需要了解一下」。")
-                .append("正例（要用）：「那您大概要多少资金呢」「先问一下，您是上班还是做生意呀」。")
-                .append("先接住客户本句，再自然往下聊；每次只说一句，不超过").append(maxChars).append("字；")
-                .append("说完停等客户；一次只问一个问题。主线只是引导目标，不要照念原文。")
+        sb.append("\n\n【说话风格】你是电话里的真人信贷顾问，必须全程口语聊天，像跟熟人打电话：")
+                .append("用「您、这边、大概、那、行、嗯」；禁止书面腔、念稿腔、问卷腔。")
+                .append("反例（禁止）：「请问您大概需要多少资金呢」「有几个问题需要了解一下」「好的有车，再问一下」。")
+                .append("正例（要用）：「行，那您大概想用多少呢」「上班是吧，社保公积金都在交吗」。")
+                .append("先半句接住客户本句，再自然往下聊；一整口气说完，大约").append(maxChars).append("字内；")
+                .append("说完停等客户；一次只问一个问题。可以带「行/嗯」承接，但不要空喊接话词。")
+                .append("主线只是引导目标，不要照念原文，可改口语说法。")
                 .append("听不清就换个说法再问，禁止瞎猜、跳题、主动挂断或说再见。");
         sb.append("\n【实时对话】严格轮次；已通话").append(elapsedSeconds).append("秒（上限")
                 .append(ForcedHangupRules.MAX_CALL_SECONDS).append("秒）。")

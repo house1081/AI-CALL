@@ -8,6 +8,7 @@
           <el-option v-for="(l,v) in statusMap" :key="v" :value="Number(v)" :label="l" />
         </el-select>
       </el-form-item>
+      <el-form-item label="退出原因"><el-input v-model="query.exitReason" placeholder="如 customer_hangup_late" clearable style="width:180px" /></el-form-item>
       <el-button type="primary" @click="load">查询</el-button>
       <el-button @click="doExport">导出Excel</el-button>
     </el-form>
@@ -35,6 +36,11 @@
           </template>
           <span v-else>{{ row.hangupType || '-' }}</span>
         </template>
+      </el-table-column>
+      <el-table-column prop="exitReason" label="退出原因" width="150" show-overflow-tooltip />
+      <el-table-column prop="dialogRounds" label="轮次" width="70" />
+      <el-table-column label="AI挂" width="70">
+        <template #default="{ row }">{{ row.aiHangup === 1 ? '是' : (row.aiHangup === 0 ? '否' : '-') }}</template>
       </el-table-column>
       <el-table-column label="状态" width="130">
         <template #default="{row}">

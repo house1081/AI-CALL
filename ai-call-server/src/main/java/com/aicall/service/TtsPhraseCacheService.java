@@ -77,6 +77,7 @@ public class TtsPhraseCacheService {
                 ForcedHangupRules.turnBasedUnclearAsrNudge(),
                 ForcedHangupRules.hearingFallbackReply(),
                 ForcedHangupRules.llmTimeoutFallbackReply(),
+                ForcedHangupRules.mustSpeakFallbackReply(),
                 ForcedHangupRules.softDeclineRecoveryReply(),
                 ForcedHangupRules.continueDialogReply(""),
                 "您好，请问您这边可以听到吗？",

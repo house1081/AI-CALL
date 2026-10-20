@@ -11,6 +11,7 @@ logging:
   level:
     com.aicall: WARN
     com.aicall.dialog: INFO
+    com.aicall.metrics: INFO
     com.aicall.service.CallAiVoiceService: INFO
     com.aicall.service.OutboundDialogLoopService: INFO
     com.aicall.service.DialogVoiceTrainingService: INFO
@@ -38,20 +39,25 @@ spring:
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
-    url: jdbc:mysql://127.0.0.1:3306/ai-call?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
-    username: root
-    password: 123456
+    url: ${MYSQL_URL:jdbc:mysql://127.0.0.1:3306/ai-call?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
   data:
     redis:
-      host: 127.0.0.1
-      port: 6379
-      password: root
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:root}
       database: 0
   servlet:
     multipart:
       max-file-size: 10MB
       max-request-size: 10MB
+
+# JWT（生产务必设置环境变量 JWT_SECRET）
+jwt:
+  secret: ${JWT_SECRET:ai-call-jwt-secret-key-2026-min-256-bits-required-for-hs256}
+  expire-hours: ${JWT_EXPIRE_HOURS:24}
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -60,10 +66,6 @@ mybatis-plus:
   global-config:
     db-config:
       id-type: auto
-
-jwt:
-  secret: ai-call-jwt-secret-key-2026-min-256-bits-required-for-hs256
-  expire-hours: 24
 
 record:
   upload-path: ./uploads/record/
@@ -74,10 +76,10 @@ freeswitch:
   host: 127.0.0.1
   sip-port: 5060
   esl-port: 8021
-  # 须与 FS event_socket.conf 中 password 一致；默认 ClueCon
-  esl-password: ClueCon
+  # 须与 FS event_socket.conf 中 password 一致；生产用 FS_ESL_PASSWORD
+  esl-password: ${FS_ESL_PASSWORD:ClueCon}
   gateway: default
-  callback-secret: ""
+  callback-secret: ${FS_CALLBACK_SECRET:}
   callback-base-url: http://127.0.0.1:8081
   # 振铃等待秒数；接通后通话时长由 dialog-max-call-sec+30 自动计算（勿只用 60，否则约 1 分钟 FS 会挂断）
   originate-timeout-sec: 60
@@ -146,10 +148,10 @@ ai-voice:
   fs-builtin-sound: ""
   speak-voice: en|flite
   speak-fallback-voices: en|callie,eng|flite
-  # 单轮播报软上限（承接+口语提问）
-  max-speak-chars: 36
-  # 流式首句：有标点可更早开播；无标点时最多等这么多字（越低开口越快）
-  stream-tts-first-chunk-chars: 10
+  # 单轮播报：允许「半句承接 + 一问」一口气说完，避免过短像念表
+  max-speak-chars: 52
+  # 流式首句：等有实质半句再开播，减少「好的。」式机械开头
+  stream-tts-first-chunk-chars: 16
   # 整句一次性识别，杜绝流式等待延迟
   asr-mode: sentence
   asr-stream-enabled: false
@@ -160,9 +162,9 @@ ai-voice:
   asr-warm-on-startup: true
   outbound-ready-gate-enabled: true
   outbound-ready-max-wait-ms: 180000
-  dialog-llm-max-tokens: 48
+  dialog-llm-max-tokens: 80
   # 略高温度，口语更自然、少背稿感
-  dialog-llm-temperature: 0.5
+  dialog-llm-temperature: 0.55
   dialog-llm-top-p: 0.88
   # 关闭蜂鸣/内置音效/speak 机械音回退
   enable-tone-fallback: false
@@ -175,8 +177,9 @@ ai-voice:
   fs-socket-host: 0.0.0.0
   fs-socket-port: 8888
   asr-http-url: ""
-  asr-connect-timeout-ms: 5000
-  asr-read-timeout-ms: 12000
+  asr-connect-timeout-ms: 3000
+  # ASR 读超时压短：网络抖动时尽快失败并播「没听清」，避免空等 12s+
+  asr-read-timeout-ms: 4000
   # ASR：抗杂音优先（尖峰噪声勿误触发开麦）；句末静音取档位与本值较大者
   asr-vad-enabled: true
   asr-vad-silence-ms: 350
@@ -227,6 +230,12 @@ ai-voice:
   dialog-llm-timeout-sec: 9
   # 首句开播门控：超时仍未真正开播则立刻主线/槽位兜底，禁止空等
   dialog-llm-ttft-timeout-sec: 3
+  # 商业级：首句开播超过该毫秒打 [SLA] WARN 并计入事故率
+  commercial-ttfa-warn-ms: 3000
+  # 整轮必须开口预算（含 LLM+TTS）；超时强制本地兜底话术
+  dialog-must-speak-ms: 5000
+  # CosyVoice HTTP 超时，尽快失败走短语缓存/SAPI
+  tts-http-timeout-sec: 5
   dialog-llm-pool-size: 6
   opening-voice-precache-enabled: true
   # 启动时仅检查开场白/结束语预录是否就绪，不自动 CosyVoice 合成
@@ -240,6 +249,7 @@ ai-voice:
   dialog-reply-audio-cache-max-entries: 1024
   dialog-reply-audio-cache-min-user-chars: 2
   dialog-reply-audio-cache-max-user-chars: 80
+  # 商业级：云 TTS/LLM 故障时自动切预录，默认开启（勿关）
   prerecord-circuit-enabled: true
   prerecord-pause-min-ms: 500
   prerecord-pause-max-ms: 1200

@@ -25,6 +25,7 @@ public class PortalQueryService {
     private final DialogCallContextService dialogCallContextService;
     private final AiPromptMapper aiPromptMapper;
     private final DialogKnowledgeBaseMapper dialogKnowledgeBaseMapper;
+    private final TenantAgentMapper tenantAgentMapper;
 
     public List<CallRecordVO> enrichCallRecords(List<CallRecord> records) {
         if (records.isEmpty()) {
@@ -37,12 +38,22 @@ public class PortalQueryService {
         Map<Integer, Customer> customerMap = customerIds.isEmpty() ? Map.of()
                 : customerMapper.selectBatchIds(customerIds).stream()
                 .collect(Collectors.toMap(Customer::getId, c -> c));
+        Set<Integer> agentIds = records.stream()
+                .map(CallRecord::getAgentId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Integer, TenantAgent> agentMap = agentIds.isEmpty() ? Map.of()
+                : tenantAgentMapper.selectBatchIds(agentIds).stream()
+                .collect(Collectors.toMap(TenantAgent::getId, a -> a));
 
         return records.stream().map(r -> {
             CallRecordVO vo = new CallRecordVO();
             copyCallRecord(r, vo);
             if (r.getCustomerId() != null && customerMap.containsKey(r.getCustomerId())) {
                 vo.setCustomerName(customerMap.get(r.getCustomerId()).getName());
+            }
+            if (r.getAgentId() != null && agentMap.containsKey(r.getAgentId())) {
+                vo.setAgentName(agentMap.get(r.getAgentId()).getName());
             }
             return vo;
         }).toList();
@@ -153,6 +164,8 @@ public class PortalQueryService {
         dest.setCallStatus(src.getCallStatus());
         dest.setCallTime(src.getCallTime());
         dest.setTaskId(src.getTaskId());
+        dest.setAgentId(src.getAgentId());
+        dest.setCallMode(src.getCallMode());
     }
 
     private void copyTask(CallTask src, CallTaskVO dest) {

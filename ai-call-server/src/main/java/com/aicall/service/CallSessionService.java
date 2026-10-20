@@ -89,6 +89,7 @@ public class CallSessionService {
         record.setCallTime(LocalDateTime.now());
         record.setLevel("D");
         record.setHangupType(null);
+        record.setCallMode(com.aicall.common.CallMode.AI_TASK);
         DialogCallContext dialogCtx = dialogCallContextService.resolveForTenantTask(req.getTenantId(), req.getTaskId());
         record.setPromptId(dialogCtx.getPromptId());
         record.setKbId(dialogCtx.getKbId());
@@ -183,6 +184,15 @@ public class CallSessionService {
         } else if (CallStatus.isConnected(req.getCallStatus())) {
             record.setHangupType(HangupType.NORMAL);
         }
+        if (StringUtils.hasText(req.getExitReason())) {
+            record.setExitReason(req.getExitReason());
+        }
+        if (req.getDialogRounds() != null) {
+            record.setDialogRounds(req.getDialogRounds());
+        }
+        if (req.getAiHangup() != null) {
+            record.setAiHangup(req.getAiHangup() ? 1 : 0);
+        }
         billingService.finishCall(record, tenant, line);
         forcedHangupService.clearSession(req.getCallRecordId(), null);
         dialogMainFlowService.clearCall(req.getCallRecordId());
@@ -266,5 +276,9 @@ public class CallSessionService {
         private String nextTime;
         private String level;
         private String hangupType;
+        /** 技术退出原因（商业级可查询） */
+        private String exitReason;
+        private Integer dialogRounds;
+        private Boolean aiHangup;
     }
 }

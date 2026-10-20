@@ -1,13 +1,14 @@
 package com.aicall.service;
 
+import com.aicall.common.CallMode;
 import com.aicall.common.CallStatus;
 import com.aicall.common.HangupType;
 import com.aicall.config.FreeSwitchProperties;
-import com.aicall.service.RecordingOnlyPlaybackService;
 import com.aicall.dto.SensitiveWordMatch;
 import com.aicall.entity.CallRecord;
 import com.aicall.entity.RiskConfig;
 import com.aicall.entity.RiskLog;
+import com.aicall.entity.TenantAgent;
 import com.aicall.mapper.CallRecordMapper;
 import com.aicall.mapper.RiskLogMapper;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +30,7 @@ import java.util.concurrent.Executors;
 public class HumanTransferService {
 
     private static final String KEY_TRANSFERRED = "call:human:transferred:";
+    private static final String KEY_TRANSFER_AGENT = "call:human:agent:";
 
     private final SensitiveWordMonitorService sensitiveWordMonitorService;
     private final RiskControlService riskControlService;
@@ -44,6 +46,7 @@ public class HumanTransferService {
     private final CallRecordMapper callRecordMapper;
     private final RiskLogMapper riskLogMapper;
     private final StringRedisTemplate redisTemplate;
+    private final AgentRoutingService agentRoutingService;
 
     private final ExecutorService watchExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "human-transfer-watch");
@@ -57,25 +60,39 @@ public class HumanTransferService {
             return false;
         }
         RiskConfig cfg = riskControlService.config();
-        if (cfg.getHumanTransferEnabled() == null || cfg.getHumanTransferEnabled() != 1
-                || !StringUtils.hasText(cfg.getHumanTransferDest())) {
-            log.warn("[转顾问] 未配置转人工目标，请在风控配置中启用并填写 FS 转接目标");
+        TransferTarget target = resolveTransferTarget(callRecordId, cfg);
+        if (target == null || !StringUtils.hasText(target.dest)) {
+            log.warn("[转顾问] 未配置转人工目标，请配置坐席或风控 FS 转接目标");
             callDialogPersistService.appendSystem(callRecordId, "转顾问失败：未配置坐席转接目标");
             return false;
+        }
+        if (cfg.getHumanTransferEnabled() == null || cfg.getHumanTransferEnabled() != 1) {
+            // 有可用坐席时仍允许顾问转接；仅无坐席且未开全局转人工时拒绝
+            if (target.agentId == null) {
+                log.warn("[转顾问] 未启用转人工且无空闲坐席");
+                return false;
+            }
         }
         String lockKey = KEY_TRANSFERRED + callRecordId;
         if (!Boolean.TRUE.equals(redisTemplate.opsForValue().setIfAbsent(lockKey, uuid, Duration.ofHours(4)))) {
             return true;
         }
         try {
-            log.info("[转顾问] 预录冷门转人工 uuid={} recordId={} reason={}", uuid, callRecordId, reason);
+            log.info("[转顾问] 预录冷门转人工 uuid={} recordId={} reason={} dest={}",
+                    uuid, callRecordId, reason, target.dest);
             callDialogPersistService.appendSystem(callRecordId, "冷门问题转专业信贷顾问");
-            markHangupType(callRecordId);
+            markHangupType(callRecordId, target.agentId);
             voicePlaybackService.stopChannelPlayback(uuid);
-            boolean ok = bridgeToAgent(uuid, cfg.getHumanTransferDest().trim());
+            if (target.agentId != null) {
+                agentRoutingService.markBusy(target.agentId);
+                redisTemplate.opsForValue().set(KEY_TRANSFER_AGENT + callRecordId,
+                        String.valueOf(target.agentId), Duration.ofHours(4));
+            }
+            boolean ok = bridgeToAgent(uuid, target.dest);
             if (!ok) {
-                callDialogPersistService.appendSystem(callRecordId, "转顾问失败，请检查 FS 转接目标");
+                callDialogPersistService.appendSystem(callRecordId, "转顾问失败，请检查坐席/FS 转接目标");
                 redisTemplate.delete(lockKey);
+                releaseTransferAgent(callRecordId);
                 return false;
             }
             callDialogPersistService.appendSystem(callRecordId, "已转接专业信贷顾问");
@@ -83,6 +100,7 @@ public class HumanTransferService {
         } catch (Exception e) {
             log.error("[转顾问] 异常 uuid={} recordId={}: {}", uuid, callRecordId, e.getMessage(), e);
             redisTemplate.delete(lockKey);
+            releaseTransferAgent(callRecordId);
             return false;
         }
     }
@@ -128,13 +146,21 @@ public class HumanTransferService {
             return true;
         }
         RiskConfig cfg = riskControlService.config();
+        TransferTarget target = resolveTransferTarget(callRecordId, cfg);
         try {
-            log.warn("[风控] 关键词命中转人工 uuid={} recordId={} phone={} {}={} text={}",
-                    uuid, callRecordId, phone, match.getWordTypeLabel(), match.getWord(), userText);
+            log.warn("[风控] 关键词命中转人工 uuid={} recordId={} phone={} {}={} text={} dest={}",
+                    uuid, callRecordId, phone, match.getWordTypeLabel(), match.getWord(), userText,
+                    target != null ? target.dest : null);
+
+            if (target == null || !StringUtils.hasText(target.dest)) {
+                callDialogPersistService.appendSystem(callRecordId, "转人工失败：无空闲坐席且未配置全局转接目标");
+                redisTemplate.delete(lockKey);
+                return false;
+            }
 
             callDialogPersistService.appendSystem(callRecordId,
                     "检测到" + match.getWordTypeLabel() + "「" + match.getWord() + "」，正在转人工");
-            markHangupType(callRecordId);
+            markHangupType(callRecordId, target.agentId);
 
             voicePlaybackService.stopChannelPlayback(uuid);
 
@@ -142,11 +168,18 @@ public class HumanTransferService {
                 log.warn("[转人工] 转接提示音播放失败 uuid={}", uuid);
             }
 
-            boolean ok = bridgeToAgent(uuid, cfg.getHumanTransferDest().trim());
+            if (target.agentId != null) {
+                agentRoutingService.markBusy(target.agentId);
+                redisTemplate.opsForValue().set(KEY_TRANSFER_AGENT + callRecordId,
+                        String.valueOf(target.agentId), Duration.ofHours(4));
+            }
+
+            boolean ok = bridgeToAgent(uuid, target.dest);
             if (!ok) {
-                log.error("[转人工] FS bridge 失败 uuid={} dest={}", uuid, cfg.getHumanTransferDest());
-                callDialogPersistService.appendSystem(callRecordId, "转人工失败，请检查 FS 转接目标配置");
+                log.error("[转人工] FS bridge 失败 uuid={} dest={}", uuid, target.dest);
+                callDialogPersistService.appendSystem(callRecordId, "转人工失败，请检查坐席/FS 转接目标配置");
                 redisTemplate.delete(lockKey);
+                releaseTransferAgent(callRecordId);
                 return false;
             }
 
@@ -156,8 +189,55 @@ public class HumanTransferService {
         } catch (Exception e) {
             log.error("[转人工] 异常 uuid={} recordId={}: {}", uuid, callRecordId, e.getMessage(), e);
             redisTemplate.delete(lockKey);
+            releaseTransferAgent(callRecordId);
             return false;
         }
+    }
+
+    private TransferTarget resolveTransferTarget(Integer callRecordId, RiskConfig cfg) {
+        CallRecord record = callRecordMapper.selectById(callRecordId);
+        Integer tenantId = record != null ? record.getTenantId() : null;
+        Integer lineId = record != null ? record.getLineId() : null;
+        TenantAgent agent = agentRoutingService.pickAvailable(tenantId);
+        if (agent != null) {
+            try {
+                String dest = agentRoutingService.resolveFsDialDest(agent, lineId);
+                if (StringUtils.hasText(dest)) {
+                    TransferTarget t = new TransferTarget();
+                    t.agentId = agent.getId();
+                    t.dest = dest;
+                    return t;
+                }
+            } catch (Exception e) {
+                log.warn("[转人工] 解析坐席目标失败 agentId={}: {}", agent.getId(), e.getMessage());
+            }
+        }
+        if (cfg != null && StringUtils.hasText(cfg.getHumanTransferDest())) {
+            TransferTarget t = new TransferTarget();
+            t.dest = cfg.getHumanTransferDest().trim();
+            return t;
+        }
+        return null;
+    }
+
+    private void releaseTransferAgent(Integer callRecordId) {
+        if (callRecordId == null) {
+            return;
+        }
+        String key = KEY_TRANSFER_AGENT + callRecordId;
+        String id = redisTemplate.opsForValue().get(key);
+        redisTemplate.delete(key);
+        if (StringUtils.hasText(id)) {
+            try {
+                agentRoutingService.releaseAfterCall(Integer.parseInt(id));
+            } catch (NumberFormatException ignore) {
+            }
+        }
+    }
+
+    private static final class TransferTarget {
+        Integer agentId;
+        String dest;
     }
 
     private boolean playTransferPrompt(String uuid, RiskConfig cfg) {
@@ -252,13 +332,19 @@ public class HumanTransferService {
             log.info("[转人工] 通话已结束并结算 recordId={} duration={}s", callRecordId, duration);
         } catch (Exception e) {
             log.warn("[转人工] 结算失败 recordId={}: {}", callRecordId, e.getMessage());
+        } finally {
+            releaseTransferAgent(callRecordId);
         }
     }
 
-    private void markHangupType(Integer callRecordId) {
+    private void markHangupType(Integer callRecordId, Integer agentId) {
         CallRecord upd = new CallRecord();
         upd.setId(callRecordId);
         upd.setHangupType(HangupType.TRANSFER_HUMAN);
+        upd.setCallMode(CallMode.HUMAN_TRANSFER);
+        if (agentId != null) {
+            upd.setAgentId(agentId);
+        }
         callRecordMapper.updateById(upd);
     }
 
