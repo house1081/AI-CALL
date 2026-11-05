@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ESL：供 ai-call-server 控制外呼；密码须与 application.yml 中 freeswitch.esl-password 一致 -->
+<configuration name="event_socket.conf" description="Socket Client">
+  <settings>
+    <param name="nat-map" value="false"/>
+    <param name="listen-ip" value="0.0.0.0"/>
+    <param name="listen-port" value="8021"/>
+    <param name="password" value="ClueCon"/>
+    <!-- 允许本机与局域网，见 acl.conf.xml 中的 esl 列表 -->
+    <param name="apply-inbound-acl" value="esl"/>
+  </settings>
+</configuration>

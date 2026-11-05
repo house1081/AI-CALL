@@ -2,7 +2,10 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   { path: '/login', component: () => import('../views/Login.vue') },
-  { path: '/training', redirect: '/h5/training' },
+  // 对话训练默认进总后台（左侧菜单 + 右侧训练页），不再全屏
+  { path: '/training', redirect: '/voice-training' },
+  { path: '/voice-chat-lab', redirect: '/voice-training' },
+  { path: '/ai-chat-lab', redirect: '/voice-training' },
   { path: '/h5', redirect: '/h5/training' },
   {
     path: '/h5/login',
@@ -10,13 +13,11 @@ const routes = [
     meta: { public: true, standalone: true, title: '对话训练登录' }
   },
   {
+    // 手机端独立页保留；PC 总后台请用 /voice-training
     path: '/h5/training',
     component: () => import('../views/h5/VoiceTrainingH5.vue'),
-    meta: { public: true, standalone: true, h5: true, title: '对话训练' }
+    meta: { public: true, standalone: true, h5: true, title: '对话训练(手机)' }
   },
-  // 旧路径统一进独立 H5，不再嵌在总后台侧边栏里
-  { path: '/voice-chat-lab', redirect: '/h5/training' },
-  { path: '/ai-chat-lab', redirect: '/h5/training' },
   {
     path: '/',
     component: () => import('../layout/AdminLayout.vue'),
@@ -28,6 +29,11 @@ const routes = [
       { path: 'price', component: () => import('../views/Price.vue') },
       { path: 'ai-prompt', component: () => import('../views/AiPrompt.vue') },
       { path: 'ai-model', component: () => import('../views/AiModel.vue') },
+      {
+        path: 'voice-training',
+        component: () => import('../views/VoiceChatLab.vue'),
+        meta: { title: '对话训练' }
+      },
       { path: 'dialog-training', component: () => import('../views/DialogTraining.vue') },
       { path: 'main-flow', component: () => import('../views/MainFlowConfig.vue') },
       { path: 'risk', component: () => import('../views/Risk.vue') },

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  主用线路（当前管理后台 line.sip_account = 343543658）
+  - 网关名必须与数据库 sip_account 一致
+  - 注册域名：222.186.39.119
+  - 状态：可注册成功（REGED）
+  - 说明：线路方夜间可能禁呼，白天再测外呼
+-->
+<include>
+  <gateway name="343543658">
+    <param name="username" value="343543658"/>
+    <param name="password" value="a1314555"/>
+    <param name="realm" value="222.186.39.119"/>
+    <param name="proxy" value="222.186.39.119"/>
+    <param name="from-user" value="343543658"/>
+    <param name="from-domain" value="222.186.39.119"/>
+    <param name="expire-seconds" value="3600"/>
+    <param name="retry-seconds" value="30"/>
+    <param name="register" value="true"/>
+    <param name="register-transport" value="udp"/>
+    <param name="caller-id-in-from" value="true"/>
+  </gateway>
+</include>

@@ -9,7 +9,7 @@
         <el-menu-item index="/price">费率配置</el-menu-item>
         <el-menu-item index="/ai-prompt">AI话术</el-menu-item>
         <el-menu-item index="/ai-model">模型配置</el-menu-item>
-        <el-menu-item index="/h5/training">对话训练</el-menu-item>
+        <el-menu-item index="/voice-training">对话训练</el-menu-item>
         <el-menu-item index="/main-flow">主线流程</el-menu-item>
         <el-menu-item index="/dialog-training">训练知识库</el-menu-item>
         <el-menu-item index="/risk">风控配置</el-menu-item>
@@ -23,7 +23,7 @@
         <span>{{ username }}</span>
         <el-button type="danger" link @click="logout">退出</el-button>
       </el-header>
-      <el-main><router-view /></el-main>
+      <el-main class="main"><router-view /></el-main>
     </el-container>
   </el-container>
 </template>
@@ -42,7 +42,8 @@ const logout = () => {
 
 <style scoped>
 .layout { height: 100vh; }
-.aside { background: #001529; }
+.aside { background: #001529; overflow-y: auto; }
 .logo { color: #fff; font-size: 18px; font-weight: bold; padding: 20px; text-align: center; }
 .header { display: flex; justify-content: flex-end; align-items: center; gap: 16px; background: #fff; border-bottom: 1px solid #eee; }
+.main { background: #f0f2f5; overflow: auto; }
 </style>

@@ -1,0 +1,38 @@
+<include>
+<!-- ========== 通道1：20261019001 白名单直拨 不需要注册、无密码 ========== -->
+<gateway name="gw-ipwhite">
+  <param name="username" value="20261019001"/>
+  <param name="proxy" value="47.97.172.104:5060"/>
+  <param name="realm" value="47.97.172.104"/>
+  <param name="register" value="false"/>
+  <param name="caller-id-in-from" value="true"/>
+  <param name="from-user" value="20261019001"/>
+  <param name="ignore_early_media" value="true"/>
+</gateway>
+
+<!-- ========== 通道2：20260318001 400外显 注册模式 ========== -->
+<gateway name="gw-400">
+  <param name="username" value="20260318001"/>
+  <param name="password" value="sjXWza0A"/>
+  <param name="proxy" value="47.97.172.104:5060"/>
+  <param name="realm" value="47.97.172.104"/>
+  <param name="register" value="true"/>
+  <param name="register-transport" value="udp"/>
+  <param name="expire-seconds" value="300"/>
+  <param name="caller-id-in-from" value="true"/>
+  <param name="ignore_early_media" value="true"/>
+</gateway>
+
+<!-- ========== 通道3：20260318002 芜湖小号 注册模式 ========== -->
+<gateway name="gw-wh">
+  <param name="username" value="20260318002"/>
+  <param name="password" value="8sHWD2DM"/>
+  <param name="proxy" value="47.97.172.104:5060"/>
+  <param name="realm" value="47.97.172.104"/>
+  <param name="register" value="true"/>
+  <param name="register-transport" value="udp"/>
+  <param name="expire-seconds" value="300"/>
+  <param name="caller-id-in-from" value="true"/>
+  <param name="ignore_early_media" value="true"/>
+</gateway>
+</include>

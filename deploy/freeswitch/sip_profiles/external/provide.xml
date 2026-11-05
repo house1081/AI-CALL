@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  备用可用线路（实测可注册或可对接）
+  切换方法：管理后台把 line.sip_account 改成对应 gateway 名称，
+  并把 sip_address 改成下方 proxy 地址。
+-->
+<include>
+  <!-- 白名单直拨：不注册；需线路方把本机公网 IP 加白 -->
+  <gateway name="gw-ipwhite">
+    <param name="username" value="20261019001"/>
+    <param name="proxy" value="47.97.172.104:5060"/>
+    <param name="realm" value="47.97.172.104"/>
+    <param name="register" value="false"/>
+    <param name="caller-id-in-from" value="true"/>
+    <param name="from-user" value="20261019001"/>
+  </gateway>
+
+  <!-- 400 外显：实测可 REGED -->
+  <gateway name="gw-400">
+    <param name="username" value="20260318001"/>
+    <param name="password" value="sjXWza0A"/>
+    <param name="proxy" value="47.97.172.104:5060"/>
+    <param name="realm" value="47.97.172.104"/>
+    <param name="register" value="true"/>
+    <param name="register-transport" value="udp"/>
+    <param name="expire-seconds" value="300"/>
+    <param name="retry-seconds" value="30"/>
+    <param name="caller-id-in-from" value="true"/>
+  </gateway>
+
+  <!-- 芜湖小号：实测可 REGED -->
+  <gateway name="gw-wh">
+    <param name="username" value="20260318002"/>
+    <param name="password" value="8sHWD2DM"/>
+    <param name="proxy" value="47.97.172.104:5060"/>
+    <param name="realm" value="47.97.172.104"/>
+    <param name="register" value="true"/>
+    <param name="register-transport" value="udp"/>
+    <param name="expire-seconds" value="300"/>
+    <param name="retry-seconds" value="30"/>
+    <param name="caller-id-in-from" value="true"/>
+  </gateway>
+</include>
